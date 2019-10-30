@@ -1,0 +1,19 @@
+[package]
+name = "wasm-vk"
+version = "0.1.0"
+authors = ["Lorxu <sam@dirkback.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rspirv = { git="https://github.com/gfx-rs/rspirv", rev="219f6e2eba22c4d1834b1648dfe6b4fa6b7f9058" }
+spirv_headers = { git="https://github.com/gfx-rs/rspirv", rev="219f6e2eba22c4d1834b1648dfe6b4fa6b7f9058" }
+# spirv_headers = "*"
+parity-wasm = "0.40"
+
+[[example]]
+name = "vulkano"
+
+[dev-dependencies]
+vulkano = "*"
