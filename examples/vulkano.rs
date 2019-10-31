@@ -34,7 +34,7 @@ fn main() {
     println!("Written generated spirv to 'examples/comp.spv'");
 
     // Here's the data we'll be using, it's just BUFFER_SIZE consecutive u32s, starting at 0
-    let data_iter = (0..BUFFER_SIZE as u32);
+    let data_iter = 0..BUFFER_SIZE as u32;
 
     // We'll interpret the WASM on the CPU, and time it
     let time = Instant::now();

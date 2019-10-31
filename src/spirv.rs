@@ -124,12 +124,21 @@ impl Visitor for SBuilder {
         let uint = SType::Uint.spirv(self);
 
         let (v, t) = match op {
-            Mul(a, b) => (self.i_mul(uint, None, *a.val?, *b.val?).unwrap(), SType::Uint),
-            Add(a, b) => (self.i_add(uint, None, *a.val?, *b.val?).unwrap(), SType::Uint),
+            Mul(a, b) => (
+                self.i_mul(uint, None, *a.val?, *b.val?).unwrap(),
+                SType::Uint,
+            ),
+            Add(a, b) => (
+                self.i_add(uint, None, *a.val?, *b.val?).unwrap(),
+                SType::Uint,
+            ),
             I32Const(x) => (self.constant_u32(uint, x), SType::Uint),
             Load(x) => {
                 let ptr = self.buffer;
-                let p_uint_u = self.ty(SType::Ptr(Box::new(SType::Uint), spvh::StorageClass::Uniform));
+                let p_uint_u = self.ty(SType::Ptr(
+                    Box::new(SType::Uint),
+                    spvh::StorageClass::Uniform,
+                ));
                 let c0 = self.constant_u32(uint, 0);
                 let c4 = self.constant_u32(uint, 4);
                 let x = self.u_div(uint, None, *x.val?, c4).unwrap();
@@ -139,7 +148,10 @@ impl Visitor for SBuilder {
             }
             Store(p, x) => {
                 let ptr = self.buffer;
-                let p_uint_u = self.ty(SType::Ptr(Box::new(SType::Uint), spvh::StorageClass::Uniform));
+                let p_uint_u = self.ty(SType::Ptr(
+                    Box::new(SType::Uint),
+                    spvh::StorageClass::Uniform,
+                ));
                 let c0 = self.constant_u32(uint, 0);
                 let c4 = self.constant_u32(uint, 4);
                 let p = self.u_div(uint, None, *p.val?, c4).unwrap();
@@ -218,13 +230,17 @@ pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
     let id2 = b.load(uint, None, id2, None, []).unwrap();
 
     let mut am = AM::from_move(w);
-    let _g = am.visit(0, vec![TVal {
-        ty: WasmTy::I32,
-        val: Some(Value {
-            ty: SType::Uint,
-            val: id2,
-        })
-    }], &mut b);
+    let _g = am.visit(
+        0,
+        vec![TVal {
+            ty: WasmTy::I32,
+            val: Some(Value {
+                ty: SType::Uint,
+                val: id2,
+            }),
+        }],
+        &mut b,
+    );
 
     b.ret().unwrap();
     b.end_function().unwrap();
@@ -233,7 +249,7 @@ pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
     b.execution_mode(main, spvh::ExecutionMode::LocalSize, [64, 1, 1]);
 
     let m = b.b.module();
-    println!("{}", m.disassemble());
+    // println!("{}", m.disassemble());
     let mut spv = m.assemble();
     // TODO: test this on a big-endian system
     for i in spv.iter_mut() {
