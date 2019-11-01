@@ -5,6 +5,7 @@ use spirv_headers as spvh;
 use std::collections::HashMap;
 struct SBuilder {
     b: Builder,
+    locals: Vec<spvh::Word>,
     table: HashMap<SType, spvh::Word>,
     buffer: spvh::Word,
     idx: spvh::Word,
@@ -13,6 +14,7 @@ impl SBuilder {
     fn new(b: Builder) -> SBuilder {
         SBuilder {
             b,
+            locals: Vec::new(),
             table: HashMap::new(),
             buffer: 0,
             idx: 0,
@@ -109,29 +111,48 @@ impl std::ops::Deref for Value {
     }
 }
 
-use crate::*;
-impl TypedDefault for Option<Value> {
-    fn default(ty: WasmTy) -> Option<Value> {
-        None
+impl Into<SType> for WasmTy {
+    fn into(self) -> SType {
+        match self {
+            WasmTy::I32 => SType::Uint,
+            _ => SType::None, // TODO
+        }
     }
 }
-impl Visitor for SBuilder {
-    type Output = Option<Value>;
 
-    fn visit(&mut self, op: AOp<Option<Value>>) -> Option<Value> {
+use crate::*;
+
+impl Visitor for SBuilder {
+    type Output = Value;
+
+    fn add_local(&mut self, ty: WasmTy, val: Option<Self::Output>) {
+        let var_ty = SType::Ptr(Box::new(ty.into()), spvh::StorageClass::Function);
+        let var_ty = self.ty(var_ty);
+        let var = self.variable(var_ty, None, spvh::StorageClass::Function, None);
+        if let Some(val) = val {
+            self.store(var, *val, None, []).unwrap();
+        }
+        self.locals.push(var);
+    }
+
+    fn visit(&mut self, op: AOp<Value>) -> Value {
         use AOp::*;
 
         let uint = SType::Uint.spirv(self);
 
         let (v, t) = match op {
-            Mul(a, b) => (
-                self.i_mul(uint, None, *a.val?, *b.val?).unwrap(),
-                SType::Uint,
-            ),
-            Add(a, b) => (
-                self.i_add(uint, None, *a.val?, *b.val?).unwrap(),
-                SType::Uint,
-            ),
+            GetLocal(l) => {
+                let l = self.locals[l as usize];
+                let r = self.load(uint, None, l, None, []).unwrap();
+                (r, SType::Uint)
+            }
+            SetLocal(l, v) => {
+                let l = self.locals[l as usize];
+                self.store(l, *v.val, None, []).unwrap();
+                (0, SType::None)
+            }
+            Mul(a, b) => (self.i_mul(uint, None, *a.val, *b.val).unwrap(), SType::Uint),
+            Add(a, b) => (self.i_add(uint, None, *a.val, *b.val).unwrap(), SType::Uint),
             I32Const(x) => (self.constant_u32(uint, x), SType::Uint),
             Load(x) => {
                 let ptr = self.buffer;
@@ -141,7 +162,7 @@ impl Visitor for SBuilder {
                 ));
                 let c0 = self.constant_u32(uint, 0);
                 let c4 = self.constant_u32(uint, 4);
-                let x = self.u_div(uint, None, *x.val?, c4).unwrap();
+                let x = self.u_div(uint, None, *x.val, c4).unwrap();
                 let ptr = self.access_chain(p_uint_u, None, ptr, [c0, x]).unwrap();
                 let r = self.load(uint, None, ptr, None, []).unwrap();
                 (r, SType::Uint)
@@ -154,13 +175,13 @@ impl Visitor for SBuilder {
                 ));
                 let c0 = self.constant_u32(uint, 0);
                 let c4 = self.constant_u32(uint, 4);
-                let p = self.u_div(uint, None, *p.val?, c4).unwrap();
+                let p = self.u_div(uint, None, *p.val, c4).unwrap();
                 let ptr = self.access_chain(p_uint_u, None, ptr, [c0, p]).unwrap();
-                self.store(ptr, *x.val?, None, []).unwrap();
+                self.store(ptr, *x.val, None, []).unwrap();
                 (0, SType::None)
             }
         };
-        Some(Value { val: v, ty: t })
+        Value { val: v, ty: t }
     }
 }
 
@@ -225,22 +246,52 @@ pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
 
     let uint = b.ty(SType::Uint);
     let ptr_uint_i = b.ty(SType::Ptr(Box::new(SType::Uint), spvh::StorageClass::Input));
+    // let ptr_uint_f = b.ty(SType::Ptr(
+    //     Box::new(SType::Uint),
+    //     spvh::StorageClass::Function,
+    // ));
+    // let ptr_uint_u = b.ty(SType::Ptr(
+    //     Box::new(SType::Uint),
+    //     spvh::StorageClass::Uniform,
+    // ));
     let const_0 = b.constant_u32(uint, 0);
     let id2 = b.access_chain(ptr_uint_i, None, id, [const_0]).unwrap();
     let id2 = b.load(uint, None, id2, None, []).unwrap();
 
+    // let slot = b
+    //     .access_chain(ptr_uint_u, None, data, [const_0, id2])
+    //     .unwrap();
+    // let slot_val = b.load(uint, None, slot, None, []).unwrap();
+    //
+    // // Process for using locals:
+    // // Declaration of a local (at function start):
+    // let v = b.variable(ptr_uint_f, None, spvh::StorageClass::Function, None);
+    // // local.set:
+    // b.store(v, slot_val, None, []).unwrap();
+    // // local.get
+    // let val = b.load(uint, None, v, None, []).unwrap();
+    //
+    // let const_12 = b.constant_u32(uint, 12);
+    // let val = b.i_mul(uint, None, val, const_12).unwrap();
+    // let const_3 = b.constant_u32(uint, 3);
+    // let val = b.i_add(uint, None, val, const_3).unwrap();
+    // b.store(v, val, None, []).unwrap();
+    // let val = b.load(uint, None, v, None, []).unwrap();
+    // b.store(slot, val, None, []).unwrap();
+
     let mut am = AM::from_move(w);
-    let _g = am.visit(
+    am.visit(
         0,
         vec![TVal {
             ty: WasmTy::I32,
-            val: Some(Value {
+            val: Value {
                 ty: SType::Uint,
                 val: id2,
-            }),
+            },
         }],
         &mut b,
-    );
+    )
+    .unwrap();
 
     b.ret().unwrap();
     b.end_function().unwrap();

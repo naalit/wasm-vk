@@ -1,7 +1,8 @@
 # wasm-vk
-`wasm-vk` is be a command-line tool and Rust library to transpile WebAssembly into Vulkan SPIR-V.
+`wasm-vk` is a command-line tool and Rust library to transpile WebAssembly into Vulkan SPIR-V.
 It uses [`parity-wasm`](https://crates.io/crates/parity-wasm) to parse WASM and represent it internally,
 and [`rspirv`](https://crates.io/crates/rspirv) to emit SPIR-V.
+It makes no attempt to produce *optimized* SPIR-V - using spirv-opt after is probably a good idea.
 
 # Why
 WebAssembly was never meant just for the Web, it's meant to be used on many different platforms.
@@ -39,4 +40,13 @@ See `examples/vulkano.rs` for an example using [`Vulkano`](https://crates.io/cra
 
 # Current status
 See `examples/comp.wat` for everything `wasm-vk` currently supports.
-Generally, it's just adding, multiplying, loading, and storing i32s, with no control flow.
+Supported instructions:
+```
+- i32.mul
+- i32.add
+- i32.load
+- i32.store
+- i32.const
+- local.get (just for i32s)
+- local.set (just for i32s)
+```

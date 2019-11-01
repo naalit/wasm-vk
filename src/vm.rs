@@ -34,12 +34,23 @@ impl TypedDefault for Value {
 
 struct Interpreter {
     memory: Arc<RwLock<Vec<Value>>>,
+    locals: Vec<Value>,
 }
 impl Visitor for Interpreter {
     type Output = Value;
+
+    fn add_local(&mut self, ty: WasmTy, val: Option<Self::Output>) {
+        self.locals.push(val.unwrap_or_else(|| Value::default(ty)));
+    }
+
     fn visit(&mut self, op: AOp<Value>) -> Value {
         use AOp::*;
         match op {
+            GetLocal(l) => self.locals[l as usize],
+            SetLocal(l, v) => {
+                self.locals[l as usize] = *v;
+                Value::I32(0)
+            }
             Mul(a, b) => match (*a, *b) {
                 (Value::I32(a), Value::I32(b)) => Value::I32(a * b),
                 _ => panic!("aah2"),
@@ -79,6 +90,7 @@ pub fn interpret(buffer: &[u32], module: &wasm::Module) -> Vec<u32> {
                 ty: WasmTy::I32,
             }],
             &mut Interpreter {
+                locals: Vec::new(),
                 memory: mem.clone(),
             },
         )

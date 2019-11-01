@@ -6,6 +6,7 @@ pub use wasm::elements::ValueType as WasmTy;
 pub enum WasmError {
     SerializationError(parity_wasm::SerializationError),
     FunctionNotFound,
+    TypeError,
 }
 impl From<parity_wasm::SerializationError> for WasmError {
     fn from(p: parity_wasm::SerializationError) -> WasmError {
@@ -21,7 +22,7 @@ use std::ops::Deref;
 
 /// Some value with a value type attached
 #[derive(Clone, Debug)]
-pub struct TVal<V: TypedDefault> {
+pub struct TVal<V> {
     pub ty: WasmTy,
     pub val: V,
 }
@@ -33,7 +34,7 @@ impl<V: TypedDefault> TypedDefault for TVal<V> {
         }
     }
 }
-impl<V: TypedDefault> Deref for TVal<V> {
+impl<V> Deref for TVal<V> {
     type Target = V;
     fn deref(&self) -> &V {
         &self.val
@@ -41,7 +42,7 @@ impl<V: TypedDefault> Deref for TVal<V> {
 }
 
 /// An instruction, with attached operands of some type
-pub enum AOp<T: TypedDefault> {
+pub enum AOp<T> {
     Mul(TVal<T>, TVal<T>),
     Add(TVal<T>, TVal<T>),
     /// `Store(ptr, val)`: store `val` at location `ptr`
@@ -55,16 +56,16 @@ pub enum AOp<T: TypedDefault> {
     /// This ignores the specified offset and alignment - TODO: fix that
     Load(TVal<T>),
     I32Const(u32),
+
+    GetLocal(u32),
+    SetLocal(u32, TVal<T>),
 }
 
 /// Essentially a catamorphism
 pub trait Visitor {
-    type Output: TypedDefault + Clone;
+    type Output: Clone;
     fn visit(&mut self, op: AOp<Self::Output>) -> Self::Output;
-}
-
-struct AFrame<T: TypedDefault> {
-    locals: Vec<TVal<T>>,
+    fn add_local(&mut self, ty: WasmTy, val: Option<Self::Output>);
 }
 
 enum BorrowedOrOwned<'a, T> {
@@ -82,19 +83,17 @@ impl<'a, T> Deref for BorrowedOrOwned<'a, T> {
 }
 
 /// An Abstract Machine to visit a module's instructions
-pub struct AM<'module, T: TypedDefault> {
+pub struct AM<'module, T> {
     module: BorrowedOrOwned<'module, parity_wasm::elements::Module>,
     stack: Vec<TVal<T>>,
-    call_stack: Vec<AFrame<T>>,
 }
-impl<'module, T: TypedDefault + Clone> AM<'module, T> {
+impl<'module, T: Clone> AM<'module, T> {
     /// Construct an `AM` from a slice of bytes in the WebAssembly binary format
     /// Note: this function does no validation
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WasmError> {
         Ok(AM {
             module: BorrowedOrOwned::Owned(wasm::deserialize_buffer(bytes)?),
             stack: Vec::new(),
-            call_stack: Vec::new(),
         })
     }
 
@@ -104,7 +103,6 @@ impl<'module, T: TypedDefault + Clone> AM<'module, T> {
         AM {
             module: BorrowedOrOwned::Owned(module),
             stack: Vec::new(),
-            call_stack: Vec::new(),
         }
     }
 
@@ -114,7 +112,6 @@ impl<'module, T: TypedDefault + Clone> AM<'module, T> {
         AM {
             module: BorrowedOrOwned::Borrowed(module),
             stack: Vec::new(),
-            call_stack: Vec::new(),
         }
     }
 
@@ -122,24 +119,34 @@ impl<'module, T: TypedDefault + Clone> AM<'module, T> {
     /// Doesn't type check, the WASM it's passed is assumed to have been validated
     pub fn visit(
         &mut self,
-        fun: u32,
+        fun_idx: u32,
         params: Vec<TVal<T>>,
         v: &mut impl Visitor<Output = T>,
     ) -> Result<(), WasmError> {
         let fun = self
             .module
             .code_section()
-            .and_then(|x| x.bodies().get(fun as usize));
+            .and_then(|x| x.bodies().get(fun_idx as usize));
         if fun.is_none() {
             return Err(WasmError::FunctionNotFound);
         }
         let fun = fun.unwrap();
-        let mut locals = params;
-        for i in fun.locals() {
-            let t = i.value_type();
-            locals.push(TVal::default(t));
+
+        let fun_ty = self.module.function_section().unwrap().entries()[fun_idx as usize];
+        let wasm::elements::Type::Function(fun_ty) =
+            &self.module.type_section().unwrap().types()[fun_ty.type_ref() as usize];
+
+        for (p, i) in params.into_iter().zip(0..) {
+            if fun_ty.params().get(i) != Some(&p.ty) {
+                return Err(WasmError::TypeError);
+            }
+            v.add_local(p.ty, Some(p.val));
         }
-        self.call_stack.push(AFrame { locals });
+
+        for i in fun.locals() {
+            v.add_local(i.value_type(), None);
+        }
+
         for op in fun.code().elements() {
             match op {
                 Op::I32Mul => {
@@ -190,14 +197,17 @@ impl<'module, T: TypedDefault + Clone> AM<'module, T> {
                     val: v.visit(AOp::I32Const(unsafe { std::mem::transmute(*c) })),
                     ty: WasmTy::I32,
                 }),
-                Op::GetLocal(i) => self
-                    .stack
-                    .push(self.call_stack.last().unwrap().locals[*i as usize].clone()),
+                Op::GetLocal(i) => self.stack.push(TVal {
+                    val: v.visit(AOp::GetLocal(*i)),
+                    ty: WasmTy::I32,
+                }),
                 Op::SetLocal(i) => {
-                    self.call_stack.last_mut().unwrap().locals[*i as usize] = self
-                        .stack
-                        .pop()
-                        .expect("Tried to set local with an empty stack!")
+                    v.visit(AOp::SetLocal(
+                        *i,
+                        self.stack
+                            .pop()
+                            .expect("Tried to set local with an empty stack!"),
+                    ));
                 }
                 Op::End => break,
                 _ => panic!("{:?} instruction not implemented yet!", op),
