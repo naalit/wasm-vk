@@ -49,4 +49,6 @@ Supported instructions:
 - i32.const
 - local.get (just for i32s)
 - local.set (just for i32s)
+- i32.eq
+- if/then/else/end
 ```

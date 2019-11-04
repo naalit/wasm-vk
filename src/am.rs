@@ -45,6 +45,7 @@ impl<V> Deref for TVal<V> {
 pub enum AOp<T> {
     Mul(TVal<T>, TVal<T>),
     Add(TVal<T>, TVal<T>),
+    Eq(TVal<T>, TVal<T>),
     /// `Store(ptr, val)`: store `val` at location `ptr`
     ///
     /// `ptr` is a byte offset from the start of linear memory
@@ -61,10 +62,32 @@ pub enum AOp<T> {
     SetLocal(u32, TVal<T>),
 }
 
+pub enum BlockOp<T> {
+    If(TVal<T>),
+}
+
 /// Essentially a catamorphism
 pub trait Visitor {
-    type Output: Clone;
+    /// Some sort of data representing an operand or result of an instruction.
+    type Output;
+    /// Some sort of data attached to blocks (e.g. labels)
+    type BlockData;
+
+    /// Starts the type of block `op`, returning a BlockData to keep track of this block
+    ///
+    /// This is a good time to change any internal state relating to the current block.
+    /// Note, though, that you shouldn't need to maintain any kind of stack - just use BlockData.
+    fn start_block(&mut self, op: BlockOp<Self::Output>) -> Self::BlockData;
+    /// Ends the If block at `if_data`, returning a new BlockData for the Else block
+    fn else_block(&mut self, if_data: Self::BlockData) -> Self::BlockData;
+    /// Ends the block at `data`
+    fn end_block(&mut self, data: Self::BlockData);
+
+    /// Visits one instruction (that isn't a block start or end)
     fn visit(&mut self, op: AOp<Self::Output>) -> Self::Output;
+
+    /// Add a local variable of type `ty`.
+    /// If `val` is `Some`, this is a parameter with the value `val`.
     fn add_local(&mut self, ty: WasmTy, val: Option<Self::Output>);
 }
 
@@ -144,37 +167,64 @@ impl<'module, T: Clone> AM<'module, T> {
         }
 
         for i in fun.locals() {
-            v.add_local(i.value_type(), None);
+            for _ in 0..i.count() {
+                v.add_local(i.value_type(), None);
+            }
         }
 
+        let mut blocks = Vec::new();
+
         for op in fun.code().elements() {
+            macro_rules! binop {
+                ($x:ident) => {{
+                    let a = self
+                        .stack
+                        .pop()
+                        .expect(&format!("{} on empty stack!", stringify!($x)));
+                    let b = self
+                        .stack
+                        .pop()
+                        .expect(&format!("{} on stack of length 1, not 2!", stringify!($x)));
+                    assert_eq!(a.ty, b.ty, "Type error");
+                    let ty = a.ty;
+                    self.stack.push(TVal {
+                        val: v.visit(AOp::$x(a, b)),
+                        ty,
+                    });
+                }};
+            }
+
             match op {
-                Op::I32Mul => {
-                    let a = self.stack.pop().expect("i32.mul on empty stack!");
-                    let b = self
-                        .stack
-                        .pop()
-                        .expect("i32.mul on stack of length 1, not 2!");
-                    assert_eq!(a.ty, b.ty, "Type error");
-                    let ty = a.ty;
-                    self.stack.push(TVal {
-                        val: v.visit(AOp::Mul(a, b)),
-                        ty,
-                    });
+                Op::If(_) => {
+                    let data =
+                        v.start_block(BlockOp::If(self.stack.pop().expect("If on empty stack!")));
+                    blocks.push((data, true));
                 }
-                Op::I32Add => {
-                    let a = self.stack.pop().expect("i32.add on empty stack!");
-                    let b = self
-                        .stack
-                        .pop()
-                        .expect("i32.add on stack of length 1, not 2!");
-                    assert_eq!(a.ty, b.ty, "Type error");
-                    let ty = a.ty;
-                    self.stack.push(TVal {
-                        val: v.visit(AOp::Add(a, b)),
-                        ty,
-                    });
+                Op::Else => {
+                    if let Some((data, true)) = blocks.pop() {
+                        let data = v.else_block(data);
+                        blocks.push((data, false));
+                    } else {
+                        panic!("Else without If!");
+                    }
                 }
+                Op::End => {
+                    if let Some((data, is_if)) = blocks.pop() {
+                        // If this ends an If, insert a fake else block
+                        if is_if {
+                            let data = v.else_block(data);
+                            v.end_block(data);
+                        } else {
+                            v.end_block(data);
+                        }
+                    } else {
+                        // End the main function
+                        break;
+                    }
+                }
+                Op::I32Mul => binop!(Mul),
+                Op::I32Eq => binop!(Eq),
+                Op::I32Add => binop!(Add),
                 Op::I32Load(_align, _offset) => {
                     // TODO offset
                     let ptr = self.stack.pop().expect("i32.load on empty stack!");
@@ -209,7 +259,6 @@ impl<'module, T: Clone> AM<'module, T> {
                             .expect("Tried to set local with an empty stack!"),
                     ));
                 }
-                Op::End => break,
                 _ => panic!("{:?} instruction not implemented yet!", op),
             }
         }

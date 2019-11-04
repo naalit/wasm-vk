@@ -9,18 +9,30 @@
   (; The main function takes it's invocation index as a parameter and doesn't return anything;)
   (func $main (param $id i32) (result)
     (local $ptr i32)
+    (local $val i32)
     (; $id is an invocation index - we need a byte index, so we multiply by 4
        (since we're storing a 4-byte number) ;)
     (local.set $ptr
       (i32.mul
         (i32.const 4)
         (local.get $id)))
-    (i32.store
-      (local.get $ptr)
-      (; Essentially ` *ptr = (*ptr * 12) + 3 ` ;)
-      (i32.add
-        (i32.mul
-          (i32.load (local.get $ptr))
-          (i32.const 12))
-        (i32.const 3)))
+    (local.set $val
+      (i32.load (local.get $ptr)))
+    (; If this spot has a 4 in it, change it to an 18,
+       so the final result should be `(18 * 12) + 3` = 219 ;)
+    (if (i32.eq (local.get $val) (i32.const 4))
+      (then (local.set $val (i32.const 18))))
+    (; If this spot has a 3 in it, return 512 ;)
+    (if (i32.eq (local.get $val) (i32.const 3))
+      (then (i32.store (local.get $ptr) (i32.const 512)))
+      (else
+        (i32.store
+          (local.get $ptr)
+          (; Essentially ` *ptr = (*ptr * 12) + 3 ` ;)
+          (i32.add
+            (i32.mul
+              (local.get $val)
+              (i32.const 12))
+            (i32.const 3)))
+        ))
     ))

@@ -33,17 +33,55 @@ impl TypedDefault for Value {
 }
 
 struct Interpreter {
+    skipping: bool,
     memory: Arc<RwLock<Vec<Value>>>,
     locals: Vec<Value>,
 }
 impl Visitor for Interpreter {
     type Output = Value;
+    /// - None means it's not an If or we skipped the If completely, so it doesn't matter for skipping purposes.
+    /// - Some(true) means we didn't skip it, and it was an If(true) so we still aren't skipping.
+    /// - Some(false) means we didn't skip it, and it was an If(false) so we started skipping. When it ends we'll stop skipping.
+    type BlockData = Option<bool>;
+
+    fn start_block(&mut self, op: BlockOp<Value>) -> Option<bool> {
+        if self.skipping {
+            return None;
+        }
+        match op {
+            BlockOp::If(v) => match *v {
+                Value::I32(0) => {
+                    self.skipping = true;
+                    Some(false)
+                }
+                Value::I32(_) => Some(true),
+                _ => panic!("If only works on i32s, not {:?}!", v),
+            },
+        }
+    }
+
+    fn else_block(&mut self, data: Option<bool>) -> Option<bool> {
+        // Don't do anything if it's None, because we're still skipping right over it
+        let b = data?;
+        self.skipping = b;
+        Some(!b)
+    }
+
+    fn end_block(&mut self, data: Option<bool>) {
+        // If this was a False branch that we didn't skip over completely, we can stop skipping now
+        if let Some(false) = data {
+            self.skipping = false;
+        }
+    }
 
     fn add_local(&mut self, ty: WasmTy, val: Option<Self::Output>) {
         self.locals.push(val.unwrap_or_else(|| Value::default(ty)));
     }
 
     fn visit(&mut self, op: AOp<Value>) -> Value {
+        if self.skipping {
+            return Value::I32(0);
+        }
         use AOp::*;
         match op {
             GetLocal(l) => self.locals[l as usize],
@@ -51,6 +89,10 @@ impl Visitor for Interpreter {
                 self.locals[l as usize] = *v;
                 Value::I32(0)
             }
+            Eq(a, b) => match (*a, *b) {
+                (Value::I32(a), Value::I32(b)) => Value::I32(if a == b { 1 } else { 0 }),
+                _ => panic!("aah2"),
+            },
             Mul(a, b) => match (*a, *b) {
                 (Value::I32(a), Value::I32(b)) => Value::I32(a * b),
                 _ => panic!("aah2"),
@@ -90,6 +132,7 @@ pub fn interpret(buffer: &[u32], module: &wasm::Module) -> Vec<u32> {
                 ty: WasmTy::I32,
             }],
             &mut Interpreter {
+                skipping: false,
                 locals: Vec::new(),
                 memory: mem.clone(),
             },

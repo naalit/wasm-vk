@@ -122,8 +122,51 @@ impl Into<SType> for WasmTy {
 
 use crate::*;
 
+enum BlockData {
+    If { t: u32, f: u32, end: u32 },
+}
+
 impl Visitor for SBuilder {
     type Output = Value;
+    type BlockData = BlockData;
+
+    fn start_block(&mut self, op: BlockOp<Value>) -> BlockData {
+        match op {
+            BlockOp::If(cond) => {
+                let t_lbl = self.id();
+                let f_lbl = self.id();
+                let end_lbl = self.id();
+                self.selection_merge(end_lbl, spvh::SelectionControl::NONE)
+                    .unwrap();
+                self.branch_conditional(**cond, t_lbl, f_lbl, []).unwrap();
+                self.begin_basic_block(Some(t_lbl)).unwrap();
+                BlockData::If {
+                    t: t_lbl,
+                    f: f_lbl,
+                    end: end_lbl,
+                }
+            }
+        }
+    }
+
+    fn else_block(&mut self, data: BlockData) -> BlockData {
+        match data {
+            BlockData::If { end, f, .. } => {
+                self.branch(end).unwrap();
+                self.begin_basic_block(Some(f)).unwrap();
+                data
+            }
+        }
+    }
+
+    fn end_block(&mut self, data: BlockData) {
+        match data {
+            BlockData::If { end, .. } => {
+                self.branch(end).unwrap();
+                self.begin_basic_block(Some(end)).unwrap();
+            }
+        }
+    }
 
     fn add_local(&mut self, ty: WasmTy, val: Option<Self::Output>) {
         let var_ty = SType::Ptr(Box::new(ty.into()), spvh::StorageClass::Function);
@@ -151,8 +194,9 @@ impl Visitor for SBuilder {
                 self.store(l, *v.val, None, []).unwrap();
                 (0, SType::None)
             }
-            Mul(a, b) => (self.i_mul(uint, None, *a.val, *b.val).unwrap(), SType::Uint),
-            Add(a, b) => (self.i_add(uint, None, *a.val, *b.val).unwrap(), SType::Uint),
+            Eq(a, b) => (self.i_equal(uint, None, **a, **b).unwrap(), SType::Uint),
+            Mul(a, b) => (self.i_mul(uint, None, **a, **b).unwrap(), SType::Uint),
+            Add(a, b) => (self.i_add(uint, None, **a, **b).unwrap(), SType::Uint),
             I32Const(x) => (self.constant_u32(uint, x), SType::Uint),
             Load(x) => {
                 let ptr = self.buffer;
