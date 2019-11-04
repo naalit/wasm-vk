@@ -27,7 +27,8 @@ wasm-vk [options] <input.wasm> [output.spv]
 If no output file is given, it will default to 'out.spv'.
 
 Options:
-  -v, --verbose       Show more output, including dissasembled SPIR-V
+-v, --verbose       Show more output, including dissasembled SPIR-V
+-h, --help          Show this help
 ```
 
 ### Library usage

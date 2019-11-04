@@ -38,10 +38,33 @@ fn args() -> Args {
     Args { short, long, rest }
 }
 
+fn help() {
+    println!(
+        r#"wasm-vk [options] <input.wasm> [output.spv]
+
+If no output file is given, it will default to 'out.spv'.
+
+Options:
+  -v, --verbose       Show more output, including dissasembled SPIR-V
+  -h, --help          Show this help
+"#
+    );
+}
+
 fn main() {
     let mut args = args();
+
+    if args.flag('h', "help") {
+        help();
+        return;
+    }
+
     let verbose = args.flag('v', "verbose");
-    let in_file = args.next().expect("No input file!");
+    let in_file = args.next().unwrap_or_else(|| {
+        println!("No input file given\n");
+        help();
+        std::process::exit(1)
+    });
     let out_file = args.next().unwrap_or_else(|| String::from("out.spv"));
 
     if verbose {
