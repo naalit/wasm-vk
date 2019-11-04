@@ -122,11 +122,15 @@ impl Visitor for Interpreter {
 }
 
 pub fn interpret(buffer: &[u32], module: &wasm::Module) -> Vec<u32> {
+    let main = module
+        .main()
+        .expect("No 'main' exported, or it's not a function!");
+
     let mem = Arc::new(RwLock::new(buffer.iter().map(|x| Value::I32(*x)).collect()));
     for i in 0..buffer.len() {
         let mut am = AM::from_ref(module);
         am.visit(
-            0,
+            main,
             vec![TVal {
                 val: Value::I32(i as u32),
                 ty: WasmTy::I32,

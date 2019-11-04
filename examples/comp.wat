@@ -1,6 +1,5 @@
 (module
-  (; Currently, wasm-vk just uses the first defined function (index 0) as main
-     but we will switch to using the exported one, or maybe using WASMs entry point functionality ;)
+  (; wasm-vk needs us to export the main function as "main" ;)
   (export "main" (func $main))
   (; This is the buffer we're allowed to read and write
      The size declared here doesn't matter, because wasm-vk needs to be passed a buffer

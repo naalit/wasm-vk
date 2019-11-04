@@ -230,6 +230,10 @@ impl Visitor for SBuilder {
 }
 
 pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
+    let main_idx = w
+        .main()
+        .expect("No 'main' exported, or it's not a function!");
+
     let mut b = Builder::new();
     b.set_version(1, 0);
     b.capability(spvh::Capability::Shader);
@@ -325,7 +329,7 @@ pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
 
     let mut am = AM::from_move(w);
     am.visit(
-        0,
+        main_idx,
         vec![TVal {
             ty: WasmTy::I32,
             val: Value {
