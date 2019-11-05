@@ -58,6 +58,8 @@ pub enum AOp<T> {
     Load(TVal<T>),
     I32Const(u32),
 
+    GetGlobalImport(String, String),
+
     GetLocal(u32),
     SetLocal(u32, TVal<T>),
 }
@@ -72,6 +74,11 @@ pub trait Visitor {
     type Output;
     /// Some sort of data attached to blocks (e.g. labels)
     type BlockData;
+
+    /// Called after the last `add_local` call
+    fn init(&mut self) {}
+
+    fn br_break(&mut self, block: &Self::BlockData);
 
     /// Starts the type of block `op`, returning a BlockData to keep track of this block
     ///
@@ -108,43 +115,53 @@ impl<'a, T> Deref for BorrowedOrOwned<'a, T> {
 /// An Abstract Machine to visit a module's instructions
 pub struct AM<'module, T> {
     module: BorrowedOrOwned<'module, parity_wasm::elements::Module>,
+    globals: Vec<(String, String, WasmTy)>,
     stack: Vec<TVal<T>>,
 }
 impl<'module, T: Clone> AM<'module, T> {
+    fn from_bo(module: BorrowedOrOwned<'module, parity_wasm::elements::Module>) -> Self {
+        let globals = module.import_section().map(|imports| {
+            let mut v = Vec::new();
+            for i in imports.entries() {
+                if let wasm::elements::External::Global(t) = i.external() {
+                    v.push((i.module().to_owned(), i.field().to_owned(), t.content_type()));
+                }
+            }
+            v
+        }).unwrap_or_else(Vec::new);
+        AM {
+            module,
+            globals,
+            stack: Vec::new(),
+        }
+    }
+
     /// Construct an `AM` from a slice of bytes in the WebAssembly binary format
     /// Note: this function does no validation
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WasmError> {
-        Ok(AM {
-            module: BorrowedOrOwned::Owned(wasm::deserialize_buffer(bytes)?),
-            stack: Vec::new(),
-        })
+        Ok(AM::from_bo(
+            BorrowedOrOwned::Owned(wasm::deserialize_buffer(bytes)?)))
     }
 
     /// Construct an `AM` from an owned parity_wasm `Module`
     /// Note: this function does no validation
     pub fn from_move(module: wasm::elements::Module) -> Self {
-        AM {
-            module: BorrowedOrOwned::Owned(module),
-            stack: Vec::new(),
-        }
+        AM::from_bo(BorrowedOrOwned::Owned(module))
     }
 
     /// Construct an `AM` from a borrowed parity_wasm `Module`
     /// Note: this function does no validation
     pub fn from_ref(module: &'module wasm::elements::Module) -> Self {
-        AM {
-            module: BorrowedOrOwned::Borrowed(module),
-            stack: Vec::new(),
-        }
+        AM::from_bo(BorrowedOrOwned::Borrowed(module))
     }
 
     /// Visits the module with the given visitor
     /// Doesn't type check, the WASM it's passed is assumed to have been validated
-    pub fn visit(
+    pub fn visit<V: Visitor<Output=T>>(
         &mut self,
         fun_idx: u32,
         params: Vec<TVal<T>>,
-        v: &mut impl Visitor<Output = T>,
+        v: &mut V,
     ) -> Result<(), WasmError> {
         let fun = self
             .module
@@ -159,17 +176,54 @@ impl<'module, T: Clone> AM<'module, T> {
         let wasm::elements::Type::Function(fun_ty) =
             &self.module.type_section().unwrap().types()[fun_ty.type_ref() as usize];
 
-        for (p, i) in params.into_iter().zip(0..) {
+        struct TypeMap<T> {
+            i_32: T,
+            i_64: T,
+            f_32: T,
+            f_64: T,
+        }
+        impl<T> TypeMap<T> {
+            fn new(mut f: impl FnMut(WasmTy) -> T) -> Self {
+                TypeMap {
+                    i_32: f(WasmTy::I32),
+                    i_64: f(WasmTy::I64),
+                    f_32: f(WasmTy::F32),
+                    f_64: f(WasmTy::F64),
+                }
+            }
+            fn get(&self, t: WasmTy) -> &T {
+                match t {
+                    WasmTy::I32 => &self.i_32,
+                    WasmTy::I64 => &self.i_64,
+                    WasmTy::F32 => &self.f_32,
+                    WasmTy::F64 => &self.f_64,
+                }
+            }
+        }
+
+        let mut n_locals = 0;
+
+        for (p, i) in params.iter().zip(0..) {
+            n_locals += 1;
             if fun_ty.params().get(i) != Some(&p.ty) {
                 return Err(WasmError::TypeError);
             }
-            v.add_local(p.ty, Some(p.val));
+            v.add_local(p.ty, None);//Some(p.val));
         }
 
         for i in fun.locals() {
             for _ in 0..i.count() {
+                n_locals += 1;
                 v.add_local(i.value_type(), None);
             }
+        }
+
+        let tmps = TypeMap::new(|t| { v.add_local(t, None); n_locals += 1; n_locals - 1 });
+
+        v.init();
+
+        for (p, i) in params.into_iter().zip(0..) {
+            v.visit(AOp::SetLocal(i, p));
         }
 
         let mut blocks = Vec::new();
@@ -195,6 +249,27 @@ impl<'module, T: Clone> AM<'module, T> {
             }
 
             match op {
+                Op::GetGlobal(i) => {
+                    let (module, field, t) = &self.globals[*i as usize];
+                    let g = v.visit(AOp::GetGlobalImport(module.to_string(), field.to_string()));
+                    self.stack.push(TVal { val: g, ty: *t });
+                }
+                Op::Br(i) => {
+                    let data: &(V::BlockData, bool) = &blocks[blocks.len() - *i as usize - 1];
+                    // let mut data: (V::BlockData, bool) = blocks.pop().expect("'br' outside of block!");
+                    // for _ in 0..*i {
+                    //     data = blocks.pop().expect("'br i' in less than 'i' blocks!");
+                    // }
+                    let mut result = None;
+                    if let Some(s) = self.stack.pop() {
+                        result = Some(s.ty);
+                        v.visit(AOp::SetLocal(*tmps.get(s.ty), s));
+                    }
+                    v.br_break(&data.0);
+                    if let Some(t) = result {
+                        v.visit(AOp::GetLocal(*tmps.get(t)));
+                    }
+                }
                 Op::If(_) => {
                     let data =
                         v.start_block(BlockOp::If(self.stack.pop().expect("If on empty stack!")));

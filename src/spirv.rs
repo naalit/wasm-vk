@@ -38,7 +38,9 @@ impl std::ops::DerefMut for SBuilder {
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 enum SType {
+    Bool,
     Uint,
+    Float,
     Ptr(Box<SType>, spvh::StorageClass),
     Struct(Vec<SType>),
     RuntimeArray(Box<SType>),
@@ -72,11 +74,13 @@ impl SType {
             return *t;
         }
         let t = match self {
+            SType::Bool => b.type_bool(),
             SType::Ptr(x, c) => {
                 let x = x.spirv(b);
                 b.type_pointer(None, *c, x)
             }
             SType::Uint => b.type_int(32, 0),
+            SType::Float => b.type_float(32),
             SType::Struct(v) => {
                 let mut v2 = Vec::with_capacity(v.len());
                 for i in v {
@@ -114,8 +118,11 @@ impl std::ops::Deref for Value {
 impl Into<SType> for WasmTy {
     fn into(self) -> SType {
         match self {
+            // We don't actually support 64-bit ints or floats
             WasmTy::I32 => SType::Uint,
-            _ => SType::None, // TODO
+            WasmTy::I64 => SType::Uint,
+            WasmTy::F32 => SType::Float,
+            WasmTy::F64 => SType::Float,
         }
     }
 }
@@ -130,15 +137,53 @@ impl Visitor for SBuilder {
     type Output = Value;
     type BlockData = BlockData;
 
+    fn br_break(&mut self, block: &BlockData) {
+        match block {
+            BlockData::If { end, .. } => self.branch(*end).unwrap(),
+        }
+        self.begin_basic_block(None).unwrap();
+    }
+
+    /*
+
+    (block i32
+        br 0
+            1+(block i32
+                br 0
+                    1 +
+                        (block i32
+                            br 0
+                                1 + (block i32
+                                    (br 0 (i32.const 5))
+                                    ))))
+    ->
+    (local $tmp i32)
+    (block
+        (block
+            (block
+                (block
+                    $tmp = 5)
+                $tmp = 1 + $tmp)
+            $tmp = 1 + $tmp)
+        $tmp = 1 + $tmp)
+    $tmp
+    */
+
     fn start_block(&mut self, op: BlockOp<Value>) -> BlockData {
         match op {
             BlockOp::If(cond) => {
+                let uint = self.ty(SType::Uint);
+                let t_bool = self.ty(SType::Bool);
+                // `cond` is an i32, so we branch if it isn't zero
+                let zero = self.constant_u32(uint, 0);
+                let b = self.i_equal(t_bool, None, **cond, zero).unwrap();
+
                 let t_lbl = self.id();
                 let f_lbl = self.id();
                 let end_lbl = self.id();
                 self.selection_merge(end_lbl, spvh::SelectionControl::NONE)
                     .unwrap();
-                self.branch_conditional(**cond, t_lbl, f_lbl, []).unwrap();
+                self.branch_conditional(b, t_lbl, f_lbl, []).unwrap();
                 self.begin_basic_block(Some(t_lbl)).unwrap();
                 BlockData::If {
                     t: t_lbl,
@@ -178,12 +223,30 @@ impl Visitor for SBuilder {
         self.locals.push(var);
     }
 
+    fn init(&mut self) {
+        let uint = self.ty(SType::Uint);
+        let ptr_uint_i = self.ty(SType::Ptr(Box::new(SType::Uint), spvh::StorageClass::Input));
+        let const_0 = self.constant_u32(uint, 0);
+        let idx = self.idx;
+        let idx = self.access_chain(ptr_uint_i, None, idx, [const_0]).unwrap();
+        self.idx = self.load(uint, None, idx, None, []).unwrap();
+    }
+
     fn visit(&mut self, op: AOp<Value>) -> Value {
         use AOp::*;
 
         let uint = SType::Uint.spirv(self);
 
         let (v, t) = match op {
+            GetGlobalImport(module, field) => {
+                if module != "spv" {
+                    panic!("Unknown namespace {}", module);
+                }
+                match &*field {
+                    "id" => (self.idx, SType::Uint),
+                    _ => panic!("Unknown global {}", field),
+                }
+            }
             GetLocal(l) => {
                 let l = self.locals[l as usize];
                 let r = self.load(uint, None, l, None, []).unwrap();
@@ -194,7 +257,16 @@ impl Visitor for SBuilder {
                 self.store(l, *v.val, None, []).unwrap();
                 (0, SType::None)
             }
-            Eq(a, b) => (self.i_equal(uint, None, **a, **b).unwrap(), SType::Uint),
+            Eq(a, b) => {
+                // Unlike WASM, SPIR-V has booleans
+                // So we convert them to integers immediately
+                let t_bool = self.ty(SType::Bool);
+                let b = self.i_equal(t_bool, None, **a, **b).unwrap();
+                let zero = self.constant_u32(uint, 0);
+                let one = self.constant_u32(uint, 0);
+                let r = self.select(uint, None, b, one, zero).unwrap();
+                (r, SType::Uint)
+            },
             Mul(a, b) => (self.i_mul(uint, None, **a, **b).unwrap(), SType::Uint),
             Add(a, b) => (self.i_add(uint, None, **a, **b).unwrap(), SType::Uint),
             I32Const(x) => (self.constant_u32(uint, x), SType::Uint),
@@ -283,7 +355,7 @@ pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
     // let const_64 = b.constant_u32(uint, 64);
     // let const_1 = b.constant_u32(uint, 1);
     // let workgroup = b.constant_composite(uint3, [const_64, const_1, const_1]);
-    // b.decorate(workgroup, spvh::Decoration::BuiltIn, [Operand::BuiltIn(spvh::BuiltIn::WorkgroupSize)]);
+    // b.decorate(workgroup, spvh::Decoration::BuiltIn,b.load(uint, None, id2, None, []).unwrap(); [Operand::BuiltIn(spvh::BuiltIn::WorkgroupSize)]);
 
     let void = b.type_void();
     let voidf = b.type_function(void, vec![]);
@@ -303,8 +375,7 @@ pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
     //     spvh::StorageClass::Uniform,
     // ));
     let const_0 = b.constant_u32(uint, 0);
-    let id2 = b.access_chain(ptr_uint_i, None, id, [const_0]).unwrap();
-    let id2 = b.load(uint, None, id2, None, []).unwrap();
+    // let id2 = b.load(uint, None, id2, None, []).unwrap();
 
     // let slot = b
     //     .access_chain(ptr_uint_u, None, data, [const_0, id2])
@@ -330,13 +401,14 @@ pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
     let mut am = AM::from_move(w);
     am.visit(
         main_idx,
-        vec![TVal {
-            ty: WasmTy::I32,
-            val: Value {
-                ty: SType::Uint,
-                val: id2,
-            },
-        }],
+        Vec::new(),
+        // vec![TVal {
+        //     ty: WasmTy::I32,
+        //     val: Value {
+        //         ty: SType::Uint,
+        //         val: id2,
+        //     },
+        // }],
         &mut b,
     )
     .unwrap();

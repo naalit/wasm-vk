@@ -110,7 +110,9 @@ fn main() {
 
         let entry_str = std::ffi::CString::new("main").unwrap();
 
-        let entry = unsafe { shader.compute_entry_point(&entry_str, PLayout) };
+        let entry = unsafe { 
+            shader.compute_entry_point(&entry_str, PLayout)
+        };
 
         ComputePipeline::new(device.clone(), &entry, &()).unwrap()
     });

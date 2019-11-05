@@ -36,6 +36,7 @@ struct Interpreter {
     skipping: bool,
     memory: Arc<RwLock<Vec<Value>>>,
     locals: Vec<Value>,
+    idx: u32,
 }
 impl Visitor for Interpreter {
     type Output = Value;
@@ -43,6 +44,16 @@ impl Visitor for Interpreter {
     /// - Some(true) means we didn't skip it, and it was an If(true) so we still aren't skipping.
     /// - Some(false) means we didn't skip it, and it was an If(false) so we started skipping. When it ends we'll stop skipping.
     type BlockData = Option<bool>;
+
+    fn br_break(&mut self, block: &Option<bool>) {
+        // If this is Some, we didn't skip it. So:
+        // - If we started skipping at this block, we're done skipping
+        // - If we started skipping after, we ended that block too, so we're done skipping
+        // - Otherwise, we were never skipping in the first place
+        if block.is_some() {
+            self.skipping = false;
+        }
+    }
 
     fn start_block(&mut self, op: BlockOp<Value>) -> Option<bool> {
         if self.skipping {
@@ -84,6 +95,15 @@ impl Visitor for Interpreter {
         }
         use AOp::*;
         match op {
+            GetGlobalImport(module, field) => {
+                if module != "spv" {
+                    panic!("Unknown namespace {}", module);
+                }
+                match &*field {
+                    "id" => Value::I32(self.idx),
+                    _ => panic!("Unknown global {}", field),
+                }
+            }
             GetLocal(l) => self.locals[l as usize],
             SetLocal(l, v) => {
                 self.locals[l as usize] = *v;
@@ -131,14 +151,16 @@ pub fn interpret(buffer: &[u32], module: &wasm::Module) -> Vec<u32> {
         let mut am = AM::from_ref(module);
         am.visit(
             main,
-            vec![TVal {
-                val: Value::I32(i as u32),
-                ty: WasmTy::I32,
-            }],
+            Vec::new(),
+            // vec![TVal {
+            //     val: Value::I32(i as u32),
+            //     ty: WasmTy::I32,
+            // }],
             &mut Interpreter {
                 skipping: false,
                 locals: Vec::new(),
                 memory: mem.clone(),
+                idx: i as u32,
             },
         )
         .unwrap();
