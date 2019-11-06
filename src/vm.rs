@@ -45,13 +45,19 @@ impl Visitor for Interpreter {
     /// - Some(false) means we didn't skip it, and it was an If(false) so we started skipping. When it ends we'll stop skipping.
     type BlockData = Option<bool>;
 
-    fn br_break(&mut self, block: &mut [Option<bool>]) {
-        // If this is Some, we didn't skip it. So:
-        // - If we started skipping at this block, we're done skipping
-        // - If we started skipping after, we ended that block too, so we're done skipping
-        // - Otherwise, we were never skipping in the first place
-        if block.first().and_then(|x| x.as_ref()).is_some() {
-            self.skipping = false;
+    fn br_break(&mut self, blocks: &mut [Option<bool>]) {
+        // Don't do anything if we're skipping the br instruction
+        if !self.skipping {
+            // We start skipping now
+            self.skipping = true;
+            // Don't stop on any of these blocks
+            for block in blocks.iter_mut() {
+                *block = None;
+            }
+            // Until the last one
+            if let Some(b) = blocks.last_mut() {
+                *b = Some(false);
+            }
         }
     }
 

@@ -14,10 +14,10 @@ Because of all this, we can create a WebAssembly embedder that runs on the GPU, 
 # Mapping
 `wasm-vk` compiles a WebAssembly module into a Vulkan compute shader, currently with local size hardcoded as 64x1x1.
 WASM's *linear memory* is represented as a single Vulkan buffer, at descriptor set 0 and binding 0, which can be both read and written to by the shader.
-Currently the main function must be exported as "main", and it needs one parameter of type i32 which is the invocation index.
+It uses the module's start function as the entry point, and shaders can define a global i32 "spv.id" which represents the thread index (gl_GlobalInvocationID.x, specifically).
 See `examples/comp.wat` for an example of a compute shader written in WebAssembly.
 
-We'll eventually add imports for SPIR-V builtins, and we may use the atomic operations from the WebAssembly threads proposal, and probably force the memory to be marked `shared`.
+We'll eventually add imports for other SPIR-V builtins, and we may use the atomic operations from the WebAssembly threads proposal, and probably force the memory to be marked `shared`.
 
 # Usage
 ### Command-line usage
@@ -52,4 +52,6 @@ Supported instructions:
 - local.set (just for i32s)
 - i32.eq
 - if/then/else/end
+- br
+- global.get (just for imported globals like 'spv.id')
 ```
