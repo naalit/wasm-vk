@@ -78,7 +78,9 @@ pub trait Visitor {
     /// Called after the last `add_local` call
     fn init(&mut self) {}
 
-    fn br_break(&mut self, block: &Self::BlockData);
+    /// `blocks` is all blocks we're going to be skipping.
+    /// The first one is the innermost block, the last one is the actual branch target
+    fn br_break(&mut self, blocks: &mut [Self::BlockData]);
 
     /// Starts the type of block `op`, returning a BlockData to keep track of this block
     ///
@@ -120,15 +122,22 @@ pub struct AM<'module, T> {
 }
 impl<'module, T: Clone> AM<'module, T> {
     fn from_bo(module: BorrowedOrOwned<'module, parity_wasm::elements::Module>) -> Self {
-        let globals = module.import_section().map(|imports| {
-            let mut v = Vec::new();
-            for i in imports.entries() {
-                if let wasm::elements::External::Global(t) = i.external() {
-                    v.push((i.module().to_owned(), i.field().to_owned(), t.content_type()));
+        let globals = module
+            .import_section()
+            .map(|imports| {
+                let mut v = Vec::new();
+                for i in imports.entries() {
+                    if let wasm::elements::External::Global(t) = i.external() {
+                        v.push((
+                            i.module().to_owned(),
+                            i.field().to_owned(),
+                            t.content_type(),
+                        ));
+                    }
                 }
-            }
-            v
-        }).unwrap_or_else(Vec::new);
+                v
+            })
+            .unwrap_or_else(Vec::new);
         AM {
             module,
             globals,
@@ -139,8 +148,9 @@ impl<'module, T: Clone> AM<'module, T> {
     /// Construct an `AM` from a slice of bytes in the WebAssembly binary format
     /// Note: this function does no validation
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WasmError> {
-        Ok(AM::from_bo(
-            BorrowedOrOwned::Owned(wasm::deserialize_buffer(bytes)?)))
+        Ok(AM::from_bo(BorrowedOrOwned::Owned(
+            wasm::deserialize_buffer(bytes)?,
+        )))
     }
 
     /// Construct an `AM` from an owned parity_wasm `Module`
@@ -157,7 +167,7 @@ impl<'module, T: Clone> AM<'module, T> {
 
     /// Visits the module with the given visitor
     /// Doesn't type check, the WASM it's passed is assumed to have been validated
-    pub fn visit<V: Visitor<Output=T>>(
+    pub fn visit<V: Visitor<Output = T>>(
         &mut self,
         fun_idx: u32,
         params: Vec<TVal<T>>,
@@ -208,7 +218,7 @@ impl<'module, T: Clone> AM<'module, T> {
             if fun_ty.params().get(i) != Some(&p.ty) {
                 return Err(WasmError::TypeError);
             }
-            v.add_local(p.ty, None);//Some(p.val));
+            v.add_local(p.ty, None); //Some(p.val));
         }
 
         for i in fun.locals() {
@@ -218,7 +228,11 @@ impl<'module, T: Clone> AM<'module, T> {
             }
         }
 
-        let tmps = TypeMap::new(|t| { v.add_local(t, None); n_locals += 1; n_locals - 1 });
+        let tmps = TypeMap::new(|t| {
+            v.add_local(t, None);
+            n_locals += 1;
+            n_locals - 1
+        });
 
         v.init();
 
@@ -226,7 +240,7 @@ impl<'module, T: Clone> AM<'module, T> {
             v.visit(AOp::SetLocal(i, p));
         }
 
-        let mut blocks = Vec::new();
+        let mut blocks: Vec<(V::BlockData, bool)> = Vec::new();
 
         for op in fun.code().elements() {
             macro_rules! binop {
@@ -255,7 +269,15 @@ impl<'module, T: Clone> AM<'module, T> {
                     self.stack.push(TVal { val: g, ty: *t });
                 }
                 Op::Br(i) => {
-                    let data: &(V::BlockData, bool) = &blocks[blocks.len() - *i as usize - 1];
+                    let mut data = Vec::new();
+                    let mut is_ifs = Vec::new();
+                    for _ in 0..=*i {
+                        let (d, i) = blocks.pop().unwrap();
+                        data.push(d);
+                        is_ifs.push(i);
+                    }
+
+                    // let data: &(V::BlockData, bool) = &blocks[blocks.len() - *i as usize - 1];
                     // let mut data: (V::BlockData, bool) = blocks.pop().expect("'br' outside of block!");
                     // for _ in 0..*i {
                     //     data = blocks.pop().expect("'br i' in less than 'i' blocks!");
@@ -265,10 +287,12 @@ impl<'module, T: Clone> AM<'module, T> {
                         result = Some(s.ty);
                         v.visit(AOp::SetLocal(*tmps.get(s.ty), s));
                     }
-                    v.br_break(&data.0);
+                    v.br_break(&mut data);
                     if let Some(t) = result {
                         v.visit(AOp::GetLocal(*tmps.get(t)));
                     }
+
+                    blocks.extend(data.into_iter().zip(is_ifs.into_iter()).rev());
                 }
                 Op::If(_) => {
                     let data =

@@ -23,6 +23,15 @@ fn main() {
     // It multiplies every number by 12 and adds 3
     let w = wasm::deserialize_file("examples/comp.wasm").unwrap();
 
+    // // Read SPIR-V from file instead of generating it - for debugging
+    // let spv = {
+    //     use std::io::Read;
+    //     let mut f = std::fs::File::open("examples/comp.spv").unwrap();
+    //     let mut buf = Vec::new();
+    //     f.read_to_end(&mut buf).unwrap();
+    //     buf
+    // };
+
     // First, we generate SPIR-V
     let spv = spirv::to_spirv(w.clone());
 
@@ -110,9 +119,7 @@ fn main() {
 
         let entry_str = std::ffi::CString::new("main").unwrap();
 
-        let entry = unsafe { 
-            shader.compute_entry_point(&entry_str, PLayout)
-        };
+        let entry = unsafe { shader.compute_entry_point(&entry_str, PLayout) };
 
         ComputePipeline::new(device.clone(), &entry, &()).unwrap()
     });

@@ -1,12 +1,13 @@
 (module
-  (; wasm-vk needs us to export the main function as "main" ;)
-  (export "main" (func $main))
+  (; wasm-vk uses our declared start function as the SPIR-V entry point ;)
+  (start $main)
+  (; We declare an imported global for getting our thread index ;)
   (import "spv" "id" (global $id i32))
   (; This is the buffer we're allowed to read and write
      The size declared here doesn't matter, because wasm-vk needs to be passed a buffer
      that the user has allocated with whatever size they want ;)
   (memory $mem 1)
-  (; The main function takes it's invocation index as a parameter and doesn't return anything;)
+  (; 'main' is a start function, so it doesn't have any parameters or return anything ;)
   (func $main
     (local $ptr i32)
     (local $val i32)
@@ -26,8 +27,9 @@
     (if (i32.eq (local.get $val) (i32.const 3))
       (then (i32.store (local.get $ptr) (i32.const 512)))
       (else
+        (; If this spot has a 0 in it, skip the updating logic - leave it at 0 ;)
         (if (i32.eq (local.get $val) (i32.const 0))
-          (then (br 1)))
+          (then (br 1))) (; Note that we branch out of the enclosing else block ;)
         (i32.store
           (local.get $ptr)
           (; Essentially ` *ptr = (*ptr * 12) + 3 ` ;)
@@ -38,4 +40,3 @@
             (i32.const 3)))
         ))
     ))
-    

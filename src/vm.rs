@@ -45,12 +45,12 @@ impl Visitor for Interpreter {
     /// - Some(false) means we didn't skip it, and it was an If(false) so we started skipping. When it ends we'll stop skipping.
     type BlockData = Option<bool>;
 
-    fn br_break(&mut self, block: &Option<bool>) {
+    fn br_break(&mut self, block: &mut [Option<bool>]) {
         // If this is Some, we didn't skip it. So:
         // - If we started skipping at this block, we're done skipping
         // - If we started skipping after, we ended that block too, so we're done skipping
         // - Otherwise, we were never skipping in the first place
-        if block.is_some() {
+        if block.first().and_then(|x| x.as_ref()).is_some() {
             self.skipping = false;
         }
     }
@@ -143,8 +143,8 @@ impl Visitor for Interpreter {
 
 pub fn interpret(buffer: &[u32], module: &wasm::Module) -> Vec<u32> {
     let main = module
-        .main()
-        .expect("No 'main' exported, or it's not a function!");
+        .start_section()
+        .expect("No 'start' function in module!");
 
     let mem = Arc::new(RwLock::new(buffer.iter().map(|x| Value::I32(*x)).collect()));
     for i in 0..buffer.len() {

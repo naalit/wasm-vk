@@ -48,27 +48,6 @@ enum SType {
     None,
 }
 impl SType {
-    fn lea(&self) -> Option<SType> {
-        match self {
-            SType::Ptr(x, c) => match &**x {
-                SType::RuntimeArray(x) => Some(SType::Ptr(x.clone(), *c)),
-                SType::Struct(v) => {
-                    assert_eq!(v.len(), 1);
-                    Some(SType::Ptr(Box::new(v[0].clone()), *c))
-                }
-                SType::Vector(x, _) => Some(SType::Ptr(x.clone(), *c)),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-    fn deref(&self) -> Option<SType> {
-        match self {
-            SType::Ptr(x, _) => Some((**x).clone()),
-            // SType::RuntimeArray(x) => Some((**x).clone()),
-            _ => None,
-        }
-    }
     fn spirv(&self, b: &mut SBuilder) -> spvh::Word {
         if let Some(t) = b.table.get(self) {
             return *t;
@@ -129,45 +108,72 @@ impl Into<SType> for WasmTy {
 
 use crate::*;
 
+#[derive(Debug)]
 enum BlockData {
-    If { t: u32, f: u32, end: u32 },
+    If {
+        t: u32,
+        f: u32,
+        end: u32,
+    },
+    /// A block that must branch to 'end' after completing 'block'
+    Shim {
+        block: Box<BlockData>,
+        end: u32,
+    },
 }
 
 impl Visitor for SBuilder {
     type Output = Value;
     type BlockData = BlockData;
 
-    fn br_break(&mut self, block: &BlockData) {
-        match block {
-            BlockData::If { end, .. } => self.branch(*end).unwrap(),
+    fn br_break(&mut self, blocks: &mut [BlockData]) {
+        let mut last_end = None;
+        for i in 0..blocks.len() {
+            let end = match &mut blocks[i] {
+                BlockData::If { end, .. } => end,
+                BlockData::Shim { end, .. } => end,
+            };
+            let end2 = *end;
+
+            if let Some(last_end) = last_end {
+                // This block has a child, so we change the parent's end block to the child's old end block
+                //  and redirect it with a shim to our old end block.
+                //
+                // When the child block finishes, it will branch to our end block, which is now
+                //  the block the child declared as its merge block. Then, it will branch to the
+                //  block that the parent declared as its merge block before continuing. So,
+                //  both blocks fulfill their promises
+                let block = &mut blocks[i];
+                let mut block2 = BlockData::If { t: 0, f: 0, end: 0 };
+                std::mem::swap(block, &mut block2);
+                *block = match block2 {
+                    BlockData::If { t, f, end } => BlockData::Shim {
+                        block: Box::new(BlockData::If {
+                            t,
+                            f,
+                            end: last_end,
+                        }),
+                        end,
+                    },
+                    BlockData::Shim { block, end } => BlockData::Shim {
+                        block: Box::new(BlockData::Shim {
+                            block,
+                            end: last_end,
+                        }),
+                        end,
+                    },
+                };
+            } else {
+                // This is the innermost block, so branch to the old 'end' and set the new end to a new block
+                self.branch(*end).unwrap();
+                *end = self.id();
+                self.begin_basic_block(None).unwrap();
+
+                println!("{:?}", blocks[i]);
+            }
+            last_end = Some(end2);
         }
-        self.begin_basic_block(None).unwrap();
     }
-
-    /*
-
-    (block i32
-        br 0
-            1+(block i32
-                br 0
-                    1 +
-                        (block i32
-                            br 0
-                                1 + (block i32
-                                    (br 0 (i32.const 5))
-                                    ))))
-    ->
-    (local $tmp i32)
-    (block
-        (block
-            (block
-                (block
-                    $tmp = 5)
-                $tmp = 1 + $tmp)
-            $tmp = 1 + $tmp)
-        $tmp = 1 + $tmp)
-    $tmp
-    */
 
     fn start_block(&mut self, op: BlockOp<Value>) -> BlockData {
         match op {
@@ -183,7 +189,8 @@ impl Visitor for SBuilder {
                 let end_lbl = self.id();
                 self.selection_merge(end_lbl, spvh::SelectionControl::NONE)
                     .unwrap();
-                self.branch_conditional(b, t_lbl, f_lbl, []).unwrap();
+                // b is `cond == 0`, so we swap true and false here
+                self.branch_conditional(b, f_lbl, t_lbl, []).unwrap();
                 self.begin_basic_block(Some(t_lbl)).unwrap();
                 BlockData::If {
                     t: t_lbl,
@@ -196,10 +203,17 @@ impl Visitor for SBuilder {
 
     fn else_block(&mut self, data: BlockData) -> BlockData {
         match data {
-            BlockData::If { end, f, .. } => {
+            BlockData::If { end, f, t } => {
                 self.branch(end).unwrap();
                 self.begin_basic_block(Some(f)).unwrap();
                 data
+            }
+            BlockData::Shim { block, end } => {
+                let block = self.else_block(*block);
+                BlockData::Shim {
+                    block: Box::new(block),
+                    end,
+                }
             }
         }
     }
@@ -207,6 +221,11 @@ impl Visitor for SBuilder {
     fn end_block(&mut self, data: BlockData) {
         match data {
             BlockData::If { end, .. } => {
+                self.branch(end).unwrap();
+                self.begin_basic_block(Some(end)).unwrap();
+            }
+            BlockData::Shim { block, end } => {
+                self.end_block(*block);
                 self.branch(end).unwrap();
                 self.begin_basic_block(Some(end)).unwrap();
             }
@@ -263,10 +282,10 @@ impl Visitor for SBuilder {
                 let t_bool = self.ty(SType::Bool);
                 let b = self.i_equal(t_bool, None, **a, **b).unwrap();
                 let zero = self.constant_u32(uint, 0);
-                let one = self.constant_u32(uint, 0);
+                let one = self.constant_u32(uint, 1);
                 let r = self.select(uint, None, b, one, zero).unwrap();
                 (r, SType::Uint)
-            },
+            }
             Mul(a, b) => (self.i_mul(uint, None, **a, **b).unwrap(), SType::Uint),
             Add(a, b) => (self.i_add(uint, None, **a, **b).unwrap(), SType::Uint),
             I32Const(x) => (self.constant_u32(uint, x), SType::Uint),
@@ -303,8 +322,8 @@ impl Visitor for SBuilder {
 
 pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
     let main_idx = w
-        .main()
-        .expect("No 'main' exported, or it's not a function!");
+        .start_section()
+        .expect("No 'start' function in module!");
 
     let mut b = Builder::new();
     b.set_version(1, 0);
