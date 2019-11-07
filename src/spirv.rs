@@ -168,8 +168,6 @@ impl Visitor for SBuilder {
                 self.branch(*end).unwrap();
                 *end = self.id();
                 self.begin_basic_block(None).unwrap();
-
-                println!("{:?}", blocks[i]);
             }
             last_end = Some(end2);
         }

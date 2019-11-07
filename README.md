@@ -52,6 +52,6 @@ Supported instructions:
 - local.set (just for i32s)
 - i32.eq
 - if/then/else/end
-- br
+- br (just 'br 0' and 'br 1' currently, higher numbers might work but probably won't)
 - global.get (just for imported globals like 'spv.id')
 ```
