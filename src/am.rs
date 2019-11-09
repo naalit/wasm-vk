@@ -311,6 +311,9 @@ impl<'module, T: Clone> AM<'module, T> {
             }
 
             match op {
+                Op::Drop => {
+                    self.stack.pop().unwrap();
+                }
                 Op::Return => {
                     v.visit(AOp::Return);
                 }

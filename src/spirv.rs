@@ -211,8 +211,6 @@ impl Visitor for SBuilder {
                 self.loop_merge(end, cont, spvh::LoopControl::NONE, [])
                     .unwrap();
                 self.branch(body).unwrap();
-                self.begin_basic_block(Some(cont)).unwrap();
-                self.branch(head).unwrap();
                 self.begin_basic_block(Some(body)).unwrap();
 
                 BlockData::Loop { head, end, cont }
@@ -270,15 +268,20 @@ impl Visitor for SBuilder {
                 self.branch(end).unwrap();
                 self.begin_basic_block(Some(end)).unwrap();
             }
-            BlockData::Loop { end, .. } => {
+            BlockData::Loop { end, cont, head } => {
                 // For WASM loops, the default behaviour is to break out of a loop at the end
                 self.branch(end).unwrap();
+
+                // SPIR-V requires the continue block to be after the rest of the loop
+                self.begin_basic_block(Some(cont)).unwrap();
+                self.branch(head).unwrap();
+
                 self.begin_basic_block(Some(end)).unwrap();
             }
         }
     }
 
-    fn add_local(&mut self, ty: WasmTy, val: Option<Self::Output>) {
+    fn add_local(&mut self, ty: WasmTy, val: Option<Value>) {
         let var_ty = SType::Ptr(Box::new(ty.into()), spvh::StorageClass::Function);
         let var_ty = self.ty(var_ty);
         let var = self.variable(var_ty, None, spvh::StorageClass::Function, None);
