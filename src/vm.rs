@@ -32,6 +32,8 @@ impl TypedDefault for Value {
     }
 }
 
+static mut WARNED_ABOUT_CONTINUE: bool = false;
+
 struct Interpreter {
     skipping: bool,
     memory: Arc<RwLock<Vec<Value>>>,
@@ -44,6 +46,17 @@ impl Visitor for Interpreter {
     /// - Some(true) means we didn't skip it, and it was an If(true) so we still aren't skipping.
     /// - Some(false) means we didn't skip it, and it was an If(false) so we started skipping. When it ends we'll stop skipping.
     type BlockData = Option<bool>;
+
+    fn br_continue(&mut self, _blocks: &mut [Option<bool>]) {
+        unsafe {
+            if !WARNED_ABOUT_CONTINUE {
+                println!(
+                    "Note: the interpreter doesn't support loops! Each loop will only run once."
+                );
+                WARNED_ABOUT_CONTINUE = true;
+            }
+        }
+    }
 
     fn br_break(&mut self, blocks: &mut [Option<bool>]) {
         // Don't do anything if we're skipping the br instruction
@@ -74,6 +87,7 @@ impl Visitor for Interpreter {
                 Value::I32(_) => Some(true),
                 _ => panic!("If only works on i32s, not {:?}!", v),
             },
+            BlockOp::Loop => Some(true),
         }
     }
 
@@ -101,6 +115,10 @@ impl Visitor for Interpreter {
         }
         use AOp::*;
         match op {
+            Return => {
+                self.skipping = true;
+                Value::I32(0)
+            }
             GetGlobalImport(module, field) => {
                 if module != "spv" {
                     panic!("Unknown namespace {}", module);
@@ -117,15 +135,19 @@ impl Visitor for Interpreter {
             }
             Eq(a, b) => match (*a, *b) {
                 (Value::I32(a), Value::I32(b)) => Value::I32(if a == b { 1 } else { 0 }),
-                _ => panic!("aah2"),
+                _ => panic!("'eq' only implemented for i32s"),
+            },
+            LeU(a, b) => match (*a, *b) {
+                (Value::I32(a), Value::I32(b)) => Value::I32(if a <= b { 1 } else { 0 }),
+                _ => panic!("'le_u' only implemented for i32s"),
             },
             Mul(a, b) => match (*a, *b) {
                 (Value::I32(a), Value::I32(b)) => Value::I32(a * b),
-                _ => panic!("aah2"),
+                _ => panic!("'mul' only implemented for i32s"),
             },
             Add(a, b) => match (*a, *b) {
                 (Value::I32(a), Value::I32(b)) => Value::I32(a + b),
-                _ => panic!("aah3"),
+                _ => panic!("'add' only implemented for i32s"),
             },
             I32Const(u) => Value::I32(u),
             Store(ptr, val) => {
@@ -147,6 +169,7 @@ impl Visitor for Interpreter {
     }
 }
 
+/// Note that the interpreter doesn't support loops, because the abstract machine is built to only run each instruction once
 pub fn interpret(buffer: &[u32], module: &wasm::Module) -> Vec<u32> {
     let main = module
         .start_section()

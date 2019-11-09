@@ -110,6 +110,11 @@ use crate::*;
 
 #[derive(Debug)]
 enum BlockData {
+    Loop {
+        head: u32,
+        cont: u32,
+        end: u32,
+    },
     If {
         t: u32,
         f: u32,
@@ -126,10 +131,22 @@ impl Visitor for SBuilder {
     type Output = Value;
     type BlockData = BlockData;
 
+    fn br_continue(&mut self, blocks: &mut [Self::BlockData]) {
+        match blocks.last().unwrap() {
+            BlockData::Loop { cont, .. } => {
+                self.branch(*cont).unwrap();
+                // Useless basic block that will never be executed
+                self.begin_basic_block(None).unwrap();
+            }
+            _ => panic!("Non loop continue"),
+        }
+    }
+
     fn br_break(&mut self, blocks: &mut [BlockData]) {
         let mut last_end = None;
         for i in 0..blocks.len() {
             let end = match &mut blocks[i] {
+                BlockData::Loop { end, .. } => end,
                 BlockData::If { end, .. } => end,
                 BlockData::Shim { end, .. } => end,
             };
@@ -147,6 +164,14 @@ impl Visitor for SBuilder {
                 let mut block2 = BlockData::If { t: 0, f: 0, end: 0 };
                 std::mem::swap(block, &mut block2);
                 *block = match block2 {
+                    BlockData::Loop { end, head, cont } => BlockData::Shim {
+                        block: Box::new(BlockData::Loop {
+                            head,
+                            cont,
+                            end: last_end,
+                        }),
+                        end,
+                    },
                     BlockData::If { t, f, end } => BlockData::Shim {
                         block: Box::new(BlockData::If {
                             t,
@@ -175,6 +200,23 @@ impl Visitor for SBuilder {
 
     fn start_block(&mut self, op: BlockOp<Value>) -> BlockData {
         match op {
+            BlockOp::Loop => {
+                let head = self.id();
+                let cont = self.id();
+                let end = self.id();
+                let body = self.id();
+
+                self.branch(head).unwrap();
+                self.begin_basic_block(Some(head)).unwrap();
+                self.loop_merge(end, cont, spvh::LoopControl::NONE, [])
+                    .unwrap();
+                self.branch(body).unwrap();
+                self.begin_basic_block(Some(cont)).unwrap();
+                self.branch(head).unwrap();
+                self.begin_basic_block(Some(body)).unwrap();
+
+                BlockData::Loop { head, end, cont }
+            }
             BlockOp::If(cond) => {
                 let uint = self.ty(SType::Uint);
                 let t_bool = self.ty(SType::Bool);
@@ -213,6 +255,7 @@ impl Visitor for SBuilder {
                     end,
                 }
             }
+            BlockData::Loop { .. } => panic!("Else blocks not allowed for loops!"),
         }
     }
 
@@ -224,6 +267,11 @@ impl Visitor for SBuilder {
             }
             BlockData::Shim { block, end } => {
                 self.end_block(*block);
+                self.branch(end).unwrap();
+                self.begin_basic_block(Some(end)).unwrap();
+            }
+            BlockData::Loop { end, .. } => {
+                // For WASM loops, the default behaviour is to break out of a loop at the end
                 self.branch(end).unwrap();
                 self.begin_basic_block(Some(end)).unwrap();
             }
@@ -255,6 +303,12 @@ impl Visitor for SBuilder {
         let uint = SType::Uint.spirv(self);
 
         let (v, t) = match op {
+            Return => {
+                self.ret().unwrap();
+                // Unreachable block
+                self.begin_basic_block(None).unwrap();
+                (0, SType::None)
+            }
             GetGlobalImport(module, field) => {
                 if module != "spv" {
                     panic!("Unknown namespace {}", module);
@@ -273,6 +327,16 @@ impl Visitor for SBuilder {
                 let l = self.locals[l as usize];
                 self.store(l, *v.val, None, []).unwrap();
                 (0, SType::None)
+            }
+            LeU(a, b) => {
+                // Unlike WASM, SPIR-V has booleans
+                // So we convert them to integers immediately
+                let t_bool = self.ty(SType::Bool);
+                let b = self.u_less_than_equal(t_bool, None, **a, **b).unwrap();
+                let zero = self.constant_u32(uint, 0);
+                let one = self.constant_u32(uint, 1);
+                let r = self.select(uint, None, b, one, zero).unwrap();
+                (r, SType::Uint)
             }
             Eq(a, b) => {
                 // Unlike WASM, SPIR-V has booleans
@@ -319,9 +383,7 @@ impl Visitor for SBuilder {
 }
 
 pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
-    let main_idx = w
-        .start_section()
-        .expect("No 'start' function in module!");
+    let main_idx = w.start_section().expect("No 'start' function in module!");
 
     let mut b = Builder::new();
     b.set_version(1, 0);
@@ -381,8 +443,8 @@ pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
         .unwrap();
     b.begin_basic_block(None).unwrap();
 
-    let uint = b.ty(SType::Uint);
-    let ptr_uint_i = b.ty(SType::Ptr(Box::new(SType::Uint), spvh::StorageClass::Input));
+    // let uint = b.ty(SType::Uint);
+    // let ptr_uint_i = b.ty(SType::Ptr(Box::new(SType::Uint), spvh::StorageClass::Input));
     // let ptr_uint_f = b.ty(SType::Ptr(
     //     Box::new(SType::Uint),
     //     spvh::StorageClass::Function,
@@ -391,7 +453,7 @@ pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
     //     Box::new(SType::Uint),
     //     spvh::StorageClass::Uniform,
     // ));
-    let const_0 = b.constant_u32(uint, 0);
+    // let const_0 = b.constant_u32(uint, 0);
     // let id2 = b.load(uint, None, id2, None, []).unwrap();
 
     // let slot = b

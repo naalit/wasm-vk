@@ -51,7 +51,10 @@ Supported instructions:
 - local.get (just for i32s)
 - local.set (just for i32s)
 - i32.eq
+- i32.le_u
 - if/then/else/end
-- br (just 'br 0' and 'br 1' currently, higher numbers might work but probably won't)
+- loop
+- br / br_if (works for loops, sometimes works for blocks and ifs - keep your 'br' indices low for the best chance)
+- return (without a value)
 - global.get (just for imported globals like 'spv.id')
 ```

@@ -19,6 +19,22 @@
         (global.get $id)))
     (local.set $val
       (i32.load (local.get $ptr)))
+    (; If this spot has a 1 in it, start looping ;)
+    (if (i32.eq (local.get $val) (i32.const 1))
+      (then
+        (loop $continue
+          (; Add one and square it until it's bigger than thirty
+             we should get 676 ;)
+          (local.set $val
+            (i32.add (local.get $val) (i32.const 1)))
+          (local.set $val
+            (i32.mul (local.get $val) (local.get $val)))
+          (br_if $continue (i32.le_u (local.get $val) (i32.const 30)))
+        )
+        (; Store 676 to the buffer and exit ;)
+        (i32.store (local.get $ptr) (local.get $val))
+        (return)
+        ))
     (; If this spot has a 4 in it, change it to an 18,
        so the final result should be `(18 * 12) + 3` = 219 ;)
     (if (i32.eq (local.get $val) (i32.const 4))

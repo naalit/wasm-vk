@@ -43,6 +43,7 @@ impl<V> Deref for TVal<V> {
 
 /// An instruction, with attached operands of some type
 pub enum AOp<T> {
+    LeU(TVal<T>, TVal<T>),
     Mul(TVal<T>, TVal<T>),
     Add(TVal<T>, TVal<T>),
     Eq(TVal<T>, TVal<T>),
@@ -60,12 +61,21 @@ pub enum AOp<T> {
 
     GetGlobalImport(String, String),
 
+    Return,
+
     GetLocal(u32),
     SetLocal(u32, TVal<T>),
 }
 
 pub enum BlockOp<T> {
     If(TVal<T>),
+    Loop,
+}
+
+enum BlockType {
+    If,
+    Loop,
+    Block,
 }
 
 /// Essentially a catamorphism
@@ -78,6 +88,7 @@ pub trait Visitor {
     /// Called after the last `add_local` call
     fn init(&mut self) {}
 
+    fn br_continue(&mut self, blocks: &mut [Self::BlockData]);
     /// `blocks` is all blocks we're going to be skipping.
     /// The first one is the innermost block, the last one is the actual branch target
     fn br_break(&mut self, blocks: &mut [Self::BlockData]);
@@ -110,6 +121,31 @@ impl<'a, T> Deref for BorrowedOrOwned<'a, T> {
         match self {
             BorrowedOrOwned::Borrowed(x) => x,
             BorrowedOrOwned::Owned(x) => &x,
+        }
+    }
+}
+
+struct TypeMap<T> {
+    i_32: T,
+    i_64: T,
+    f_32: T,
+    f_64: T,
+}
+impl<T> TypeMap<T> {
+    fn new(mut f: impl FnMut(WasmTy) -> T) -> Self {
+        TypeMap {
+            i_32: f(WasmTy::I32),
+            i_64: f(WasmTy::I64),
+            f_32: f(WasmTy::F32),
+            f_64: f(WasmTy::F64),
+        }
+    }
+    fn get(&self, t: WasmTy) -> &T {
+        match t {
+            WasmTy::I32 => &self.i_32,
+            WasmTy::I64 => &self.i_64,
+            WasmTy::F32 => &self.f_32,
+            WasmTy::F64 => &self.f_64,
         }
     }
 }
@@ -165,6 +201,41 @@ impl<'module, T: Clone> AM<'module, T> {
         AM::from_bo(BorrowedOrOwned::Borrowed(module))
     }
 
+    fn br<V: Visitor<Output = T>>(
+        stack: &mut Vec<TVal<T>>,
+        i: u32,
+        blocks: &mut Vec<(V::BlockData, BlockType)>,
+        tmps: &mut TypeMap<u32>,
+        v: &mut V,
+    ) {
+        let mut data = Vec::new();
+        let mut tys = Vec::new();
+        for _ in 0..=i {
+            let (d, t) = blocks.pop().unwrap();
+            data.push(d);
+            tys.push(t);
+        }
+
+        match tys.last().expect("'br' without block") {
+            BlockType::Loop => {
+                v.br_continue(&mut data);
+            }
+            BlockType::If | BlockType::Block => {
+                let mut result = None;
+                if let Some(s) = stack.pop() {
+                    result = Some(s.ty);
+                    v.visit(AOp::SetLocal(*tmps.get(s.ty), s));
+                }
+                v.br_break(&mut data);
+                if let Some(t) = result {
+                    v.visit(AOp::GetLocal(*tmps.get(t)));
+                }
+            }
+        }
+
+        blocks.extend(data.into_iter().zip(tys.into_iter()).rev());
+    }
+
     /// Visits the module with the given visitor
     /// Doesn't type check, the WASM it's passed is assumed to have been validated
     pub fn visit<V: Visitor<Output = T>>(
@@ -186,31 +257,6 @@ impl<'module, T: Clone> AM<'module, T> {
         let wasm::elements::Type::Function(fun_ty) =
             &self.module.type_section().unwrap().types()[fun_ty.type_ref() as usize];
 
-        struct TypeMap<T> {
-            i_32: T,
-            i_64: T,
-            f_32: T,
-            f_64: T,
-        }
-        impl<T> TypeMap<T> {
-            fn new(mut f: impl FnMut(WasmTy) -> T) -> Self {
-                TypeMap {
-                    i_32: f(WasmTy::I32),
-                    i_64: f(WasmTy::I64),
-                    f_32: f(WasmTy::F32),
-                    f_64: f(WasmTy::F64),
-                }
-            }
-            fn get(&self, t: WasmTy) -> &T {
-                match t {
-                    WasmTy::I32 => &self.i_32,
-                    WasmTy::I64 => &self.i_64,
-                    WasmTy::F32 => &self.f_32,
-                    WasmTy::F64 => &self.f_64,
-                }
-            }
-        }
-
         let mut n_locals = 0;
 
         for (p, i) in params.iter().zip(0..) {
@@ -228,7 +274,7 @@ impl<'module, T: Clone> AM<'module, T> {
             }
         }
 
-        let tmps = TypeMap::new(|t| {
+        let mut tmps = TypeMap::new(|t| {
             v.add_local(t, None);
             n_locals += 1;
             n_locals - 1
@@ -240,16 +286,18 @@ impl<'module, T: Clone> AM<'module, T> {
             v.visit(AOp::SetLocal(i, p));
         }
 
-        let mut blocks: Vec<(V::BlockData, bool)> = Vec::new();
+        let mut blocks: Vec<(V::BlockData, BlockType)> = Vec::new();
 
         for op in fun.code().elements() {
             macro_rules! binop {
                 ($x:ident) => {{
-                    let a = self
+                    // Stack = [.. a, b]
+                    // so pop b, then a
+                    let b = self
                         .stack
                         .pop()
                         .expect(&format!("{} on empty stack!", stringify!($x)));
-                    let b = self
+                    let a = self
                         .stack
                         .pop()
                         .expect(&format!("{} on stack of length 1, not 2!", stringify!($x)));
@@ -263,54 +311,47 @@ impl<'module, T: Clone> AM<'module, T> {
             }
 
             match op {
+                Op::Return => {
+                    v.visit(AOp::Return);
+                }
+                Op::Loop(_) => {
+                    let data = v.start_block(BlockOp::Loop);
+                    blocks.push((data, BlockType::Loop));
+                }
                 Op::GetGlobal(i) => {
                     let (module, field, t) = &self.globals[*i as usize];
                     let g = v.visit(AOp::GetGlobalImport(module.to_string(), field.to_string()));
                     self.stack.push(TVal { val: g, ty: *t });
                 }
-                Op::Br(i) => {
-                    let mut data = Vec::new();
-                    let mut is_ifs = Vec::new();
-                    for _ in 0..=*i {
-                        let (d, i) = blocks.pop().unwrap();
-                        data.push(d);
-                        is_ifs.push(i);
-                    }
-
-                    // let data: &(V::BlockData, bool) = &blocks[blocks.len() - *i as usize - 1];
-                    // let mut data: (V::BlockData, bool) = blocks.pop().expect("'br' outside of block!");
-                    // for _ in 0..*i {
-                    //     data = blocks.pop().expect("'br i' in less than 'i' blocks!");
-                    // }
-                    let mut result = None;
-                    if let Some(s) = self.stack.pop() {
-                        result = Some(s.ty);
-                        v.visit(AOp::SetLocal(*tmps.get(s.ty), s));
-                    }
-                    v.br_break(&mut data);
-                    if let Some(t) = result {
-                        v.visit(AOp::GetLocal(*tmps.get(t)));
-                    }
-
-                    blocks.extend(data.into_iter().zip(is_ifs.into_iter()).rev());
+                Op::BrIf(i) => {
+                    // We turn (br_if i c) into (if c (then br (i+1)))
+                    let data = v.start_block(BlockOp::If(
+                        self.stack.pop().expect("br_if on empty stack!"),
+                    ));
+                    blocks.push((data, BlockType::If));
+                    Self::br(&mut self.stack, *i + 1, &mut blocks, &mut tmps, v);
+                    let (data, _) = blocks.pop().unwrap();
+                    let data = v.else_block(data);
+                    v.end_block(data);
                 }
+                Op::Br(i) => Self::br(&mut self.stack, *i, &mut blocks, &mut tmps, v),
                 Op::If(_) => {
                     let data =
                         v.start_block(BlockOp::If(self.stack.pop().expect("If on empty stack!")));
-                    blocks.push((data, true));
+                    blocks.push((data, BlockType::If));
                 }
                 Op::Else => {
-                    if let Some((data, true)) = blocks.pop() {
+                    if let Some((data, BlockType::If)) = blocks.pop() {
                         let data = v.else_block(data);
-                        blocks.push((data, false));
+                        blocks.push((data, BlockType::Block));
                     } else {
                         panic!("Else without If!");
                     }
                 }
                 Op::End => {
-                    if let Some((data, is_if)) = blocks.pop() {
+                    if let Some((data, ty)) = blocks.pop() {
                         // If this ends an If, insert a fake else block
-                        if is_if {
+                        if let BlockType::If = ty {
                             let data = v.else_block(data);
                             v.end_block(data);
                         } else {
@@ -321,6 +362,7 @@ impl<'module, T: Clone> AM<'module, T> {
                         break;
                     }
                 }
+                Op::I32LeU => binop!(LeU),
                 Op::I32Mul => binop!(Mul),
                 Op::I32Eq => binop!(Eq),
                 Op::I32Add => binop!(Add),
