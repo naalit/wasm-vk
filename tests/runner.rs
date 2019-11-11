@@ -1,5 +1,4 @@
-//! Run all the tests in Vulkano.
-//! This assumes there's a line of the form ";; 1 2 3 4 5" at the start of each test file (.wat)
+//! This test framework assumes there's a line of the form ";; 1 2 3 4 5" at the start of each test file (.wat)
 //! with the expected output for the input [0 1 2 3 4 5 6 ..]
 
 use std::time::Instant;
@@ -18,67 +17,73 @@ use std::sync::Arc;
 
 const BUFFER_SIZE: usize = 65536;
 
-#[test]
-fn main() -> std::io::Result<()> {
-    let mut n_failed = 0;
+/// test!(name) => create a test named 'name', for the test file 'tests/name.wat'
+/// It should start with ';;' and then zero or more numbers, representing the start of the expected output
+/// It will be passed a buffer of the form [0, 1, 2, 3, 4, ...]
+/// If the buffer is divided equally among threads, the content of a thread's buffer cell is the same as the "spv.id" global representing that thread's index
+macro_rules! test {
+    ($t:ident) => {
+        #[test]
+        fn $t() -> std::io::Result<()> {
+            do_test(stringify!($t))
+        }
+    };
+}
 
+// --------------------
+// ACTUALY TESTS
+// --------------------
+
+test!(one);
+test!(fib);
+
+// --------------------
+// MORE FRAMEWORK STUFF
+// --------------------
+
+fn do_test(test: &'static str) -> std::io::Result<()> {
     use std::fs::File;
     use std::io::prelude::*;
     use std::io::BufReader;
-    use std::path::Path;
+    use std::path::PathBuf;
 
-    let p = Path::new("tests");
-    let tests = p.read_dir()?;
-    for test in tests {
-        let test = test?;
-        let test = test.path();
-        // Only run '.wat'
-        if test.extension() != Some(std::ffi::OsStr::new("wat")) {
-            continue
-        }
-        let test_name = test.file_name().unwrap().to_str().unwrap().to_string();
-        let f = File::open(test)?;
-        let mut buf_reader = BufReader::new(f);
-        let mut buf = String::new();
-        buf_reader.read_line(&mut buf)?;
+    let test = format!("{}.wat", test);
+    let test: PathBuf = ["tests", &test].iter().collect();
+    let test_name = test.file_name().unwrap().to_str().unwrap().to_string();
+    let f = File::open(test)?;
+    let mut buf_reader = BufReader::new(f);
+    let mut buf = String::new();
+    buf_reader.read_line(&mut buf)?;
 
-        let expected: Vec<u32> = buf
-            .split_whitespace()
-            .skip(1)
-            .inspect(|x| println!("{}", x))
-            .map(|x| x.trim().parse().unwrap())
-            .collect();
+    let expected: Vec<u32> = buf
+        .split_whitespace()
+        .skip(1)
+        .map(|x| x.trim().parse().unwrap())
+        .collect();
 
-        let mut buf = Vec::new();
-        buf_reader.read_to_end(&mut buf)?;
-        match wabt::wat2wasm(buf) {
-            Ok(binary) => {
-                let w = wasm::deserialize_buffer(&binary).unwrap();
-                let got = run_test(w);
-                if got[..expected.len()] == *expected {
-                    println!("Test {} passed", test_name);
-                } else {
-                    n_failed += 1;
-                    eprintln!(
-                        "Test {} failed, expected {:?}, got {:?}",
-                        test_name,
-                        expected,
-                        &got[..expected.len()]
-                    );
-                }
+    let mut buf = Vec::new();
+    buf_reader.read_to_end(&mut buf)?;
+    match wabt::wat2wasm(buf) {
+        Ok(binary) => {
+            let w = wasm::deserialize_buffer(&binary).unwrap();
+            let got = run_test(w);
+            if got[..expected.len()] == *expected {
+                println!("Test {} passed", test_name);
+                Ok(())
+            } else {
+                eprintln!(
+                    "Test {} failed, expected {:?}, got {:?}",
+                    test_name,
+                    expected,
+                    &got[..expected.len()]
+                );
+                Err(std::io::Error::from(std::io::ErrorKind::Other))
             }
-            Err(e) => {
-                n_failed += 1;
-                eprintln!("Test {} failed verification: {:?}", test_name, e)
-            },
         }
-    }
-
-    if n_failed == 0 {
-        Ok(())
-    } else {
-        eprintln!("{} tests failed", n_failed);
-        Err(std::io::Error::from(std::io::ErrorKind::Other))
+        Err(e) => {
+            eprintln!("Test {} failed verification: {:?}", test_name, e);
+            Err(std::io::Error::from(std::io::ErrorKind::Other))
+        }
     }
 }
 
