@@ -17,3 +17,4 @@ name = "vulkano"
 
 [dev-dependencies]
 vulkano = "*"
+wabt = "*"
