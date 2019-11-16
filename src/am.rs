@@ -311,6 +311,32 @@ impl<'module, T: Clone> AM<'module, T> {
             }
 
             match op {
+                Op::Call(fun_idx) => {
+                    let t = self.module.function_section().unwrap().entries()[*fun_idx as usize]
+                        .type_ref();
+                    let wasm::elements::Type::Function(t) =
+                        &self.module.type_section().unwrap().types()[t as usize];
+                    let params = t.params();
+                    let mut args = Vec::new();
+                    for ty in params {
+                        let s = self.stack.pop().unwrap();
+                        assert_eq!(s.ty, *ty);
+                        args.push(s);
+                    }
+                    // TODO call function with `args`
+                    //
+                    // We need to create a new Visitor for each function, at least for spirv
+                    // Maybe we tell the Visitor whether it's an entry point?
+                    // Or they define the entry point function after and it refers to a function
+                    // I think here we pass them a function index or maybe something like BlockData
+                    //  and they generate a function call
+                    // Do we create a new AM for each function?
+                    // I don't think so, we can just pass a new function and a new visitor to `visit()`
+                    // In which case maybe here we assume they've already generated that function?
+                    // I think for SPIR-V we need to give the visitor all the function prototypes
+                    //  before we start giving it function bodies, so they can call later functions
+                    unimplemented!()
+                }
                 Op::Drop => {
                     self.stack.pop().unwrap();
                 }

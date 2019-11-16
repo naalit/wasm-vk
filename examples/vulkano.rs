@@ -23,6 +23,8 @@ fn main() {
     // It multiplies every number by 12 and adds 3
     let w = wasm::deserialize_file("examples/comp.wasm").unwrap();
 
+    wasm_vk::ir::test(&w);
+
     // // Read SPIR-V from file instead of generating it - for debugging
     // let spv = {
     //     use std::io::Read;

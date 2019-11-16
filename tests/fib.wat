@@ -37,7 +37,7 @@
     (local.set $b
       (i32.const 1))
 
-    (loop
+    (loop $loop
       (if (i32.eq (local.get $i) (global.get $id))
       (then
         (; We've done the right number of iterations, so break ;)
@@ -49,7 +49,7 @@
         (local.set $b (i32.add (local.get $tmp) (local.get $b))) (; b = old_a + b ;)
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (; continue ;)
-        (br 1)
+        (br $loop)
       ))
     )
   )

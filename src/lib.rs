@@ -1,6 +1,7 @@
 mod am;
 pub mod spirv;
 mod vm;
+pub mod ir;
 
 #[doc(inline)]
 pub use vm::interpret;

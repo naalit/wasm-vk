@@ -1,7 +1,5 @@
 //! This test framework assumes there's a line of the form ";; 1 2 3 4 5" at the start of each test file (.wat)
 //! with the expected output for the input [0 1 2 3 4 5 6 ..]
-
-use std::time::Instant;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::AutoCommandBufferBuilder;
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
@@ -25,7 +23,7 @@ macro_rules! test {
     ($t:ident) => {
         #[test]
         fn $t() -> std::io::Result<()> {
-            do_test(stringify!($t))
+            run_test(stringify!($t))
         }
     };
 }
@@ -41,7 +39,8 @@ test!(fib);
 // MORE FRAMEWORK STUFF
 // --------------------
 
-fn do_test(test: &'static str) -> std::io::Result<()> {
+/// Loads, parses, and validates a WAT file, then passes it to `run_module`
+fn run_test(test: &'static str) -> std::io::Result<()> {
     use std::fs::File;
     use std::io::prelude::*;
     use std::io::BufReader;
@@ -66,7 +65,7 @@ fn do_test(test: &'static str) -> std::io::Result<()> {
     match wabt::wat2wasm(buf) {
         Ok(binary) => {
             let w = wasm::deserialize_buffer(&binary).unwrap();
-            let got = run_test(w);
+            let got = run_module(w);
             if got[..expected.len()] == *expected {
                 println!("Test {} passed", test_name);
                 Ok(())
@@ -87,39 +86,15 @@ fn do_test(test: &'static str) -> std::io::Result<()> {
     }
 }
 
-fn run_test(w: wasm::Module) -> Vec<u32> {
-    // We get our WASM from the 'comp.wasm' file, which is compiled from 'comp.wat'
-    // It multiplies every number by 12 and adds 3
-    // let w = wasm::deserialize_file("examples/comp.wasm").unwrap();
-
-    // // Read SPIR-V from file instead of generating it - for debugging
-    // let spv = {
-    //     use std::io::Read;
-    //     let mut f = std::fs::File::open("examples/comp.spv").unwrap();
-    //     let mut buf = Vec::new();
-    //     f.read_to_end(&mut buf).unwrap();
-    //     buf
-    // };
-
+/// Runs a module in Vulkano. Segfaults if the generated SPIR-V isn't valid.
+/// Note that if generated SPIR-V isn't valid for one test, the segfault will still abort the whole test process,
+/// so it will look like all tests failed.
+fn run_module(w: wasm::Module) -> Vec<u32> {
     // First, we generate SPIR-V
     let spv = spirv::to_spirv(w.clone());
 
-    // We write the SPIR-V to disk so we can disassemble it later if we want
-    use std::io::Write;
-    let mut f = std::fs::File::create("examples/comp.spv").unwrap();
-    f.write_all(&spv).unwrap();
-
-    println!("Written generated spirv to 'examples/comp.spv'");
-
     // Here's the data we'll be using, it's just BUFFER_SIZE consecutive u32s, starting at 0
     let data_iter = 0..BUFFER_SIZE as u32;
-
-    // NO interpreting for tests
-    // // We'll interpret the WASM on the CPU, and time it
-    // let time = Instant::now();
-    // We just pass `interpret` the buffer, and the `wasm::Module`, and it gives us back the new buffer
-    // let cpu_content = interpret(&data_iter.clone().collect::<Vec<_>>(), &w);
-    // let cpu_time = Instant::now() - time;
 
     // Now we'll run the SPIR-V on the GPU with Vulkano.
     // This is a bunch of boilerplate, see the Vulkano examples for explanations.
@@ -215,9 +190,6 @@ fn run_test(w: wasm::Module) -> Vec<u32> {
             .build()
             .unwrap();
 
-    // We time it from command buffer submission to fence signaling
-    let time = std::time::Instant::now();
-
     let future = sync::now(device.clone())
         .then_execute(queue.clone(), command_buffer)
         .unwrap()
@@ -226,21 +198,7 @@ fn run_test(w: wasm::Module) -> Vec<u32> {
 
     future.wait(None).unwrap();
 
-    let gpu_time = Instant::now() - time;
-
     // Here's the data the GPU got
     let b = data_buffer.read().unwrap();
     b.to_vec()
-
-    // Print the results (but only show the first 12 values of each):
-    // println!(
-    //     "GPU compiled in {:?}:\n\t{:?}",
-    //     gpu_time,
-    //     &data_buffer_content[..12]
-    // );
-    // println!(
-    //     "CPU interpreted in {:?}:\n\t{:?}",
-    //     cpu_time,
-    //     &cpu_content[..12]
-    // );
 }
