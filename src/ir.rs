@@ -1,7 +1,7 @@
 use crate::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum INumOp {
+pub enum INumOp {
     Add,
     Sub,
     Mul,
@@ -10,7 +10,7 @@ enum INumOp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ICompOp {
+pub enum ICompOp {
     Eq,
     NEq,
     LeU,
@@ -19,14 +19,14 @@ enum ICompOp {
     GeS,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Width {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Width {
     W32,
     W64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum Const {
+pub enum Const {
     I32(i32),
     I64(i64),
     F32(f32),
@@ -36,23 +36,29 @@ enum Const {
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 struct Sym(u32);
 
-#[derive(Debug, Clone, PartialEq)]
-struct Global {
-    ty: wasm::GlobalType,
-    idx: u32,
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct Local {
+    pub ty: wasm::ValueType,
+    pub idx: u32,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct Global {
+    pub ty: wasm::GlobalType,
+    pub idx: u32,
 }
 
 #[derive(Debug, Clone)]
-enum Base {
+pub enum Base {
     Nop,
     Const(Const),
     Load(wasm::ValueType, Box<Base>),
     /// Store(ptr, val)
-    Store(Box<Base>, Box<Base>),
+    Store(wasm::ValueType, Box<Base>, Box<Base>),
     INumOp(Width, INumOp, Box<Base>, Box<Base>),
     ICompOp(Width, ICompOp, Box<Base>, Box<Base>),
-    SetLocal(u32, Box<Base>),
-    GetLocal(u32),
+    SetLocal(Local, Box<Base>),
+    GetLocal(Local),
     GetGlobal(Global),
     /// A left-associative block
     Seq(Box<Base>, Box<Base>),
@@ -63,17 +69,56 @@ enum Base {
     },
 }
 
+impl Base {
+    fn map(self, f: impl Fn(Self) -> Self) -> Self {
+        match self {
+            Base::INumOp(w, op, a, b) => f(Base::INumOp(w, op, Box::new(f(*a)), Box::new(f(*b)))),
+            Base::ICompOp(w, op, a, b) => f(Base::ICompOp(w, op, Box::new(f(*a)), Box::new(f(*b)))),
+            Base::Seq(a, b) => f(Base::Seq(Box::new(f(*a)), Box::new(f(*b)))),
+            Base::Store(t, a, b) => f(Base::Store(t, Box::new(f(*a)), Box::new(f(*b)))),
+            Base::SetLocal(u, x) => f(Base::SetLocal(u, Box::new(f(*x)))),
+            Base::Load(t, p) => f(Base::Load(t, Box::new(f(*p)))),
+            x => f(x),
+        }
+    }
+    fn fold_leaves<T>(&self, start: T, f: &impl Fn(T, &Self) -> T) -> T {
+        match self {
+            Base::Seq(a, b) | Base::INumOp(_, _, a, b) | Base::ICompOp(_, _, a, b) | Base::If { t: a, f: b, .. } | Base::Store(_, a, b) => b.fold_leaves(a.fold_leaves(start, f), f),
+            Base::SetLocal(_, x) | Base::Load(_, x) => x.fold_leaves(start, f),
+            x => f(start, x),
+        }
+    }
+    fn fold<T>(&self, start: T, f: &impl Fn(T, &Self) -> T) -> T {
+        let n = f(start, self);
+        match self {
+            Base::Seq(a, b) | Base::INumOp(_, _, a, b) | Base::ICompOp(_, _, a, b) | Base::If { t: a, f: b, .. } | Base::Store(_, a, b) => b.fold(a.fold(n, f), f),
+            Base::SetLocal(_, x) | Base::Load(_, x) => x.fold_leaves(n, f),
+            _ => n,
+        }
+    }
+
+    pub fn locals(&self) -> Vec<Local> {
+        self.fold(Vec::new(), &|mut acc, x| match x {
+            Base::SetLocal(l, _) | Base::GetLocal(l) => {
+                acc.push(*l);
+                acc
+            }
+            _ => acc,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Direct {
     Nop,
     Const(Const),
     Load(wasm::ValueType, Box<Direct>),
     /// Store(ptr, val)
-    Store(Box<Direct>, Box<Direct>),
+    Store(wasm::ValueType, Box<Direct>, Box<Direct>),
     INumOp(Width, INumOp, Box<Direct>, Box<Direct>),
     ICompOp(Width, ICompOp, Box<Direct>, Box<Direct>),
-    SetLocal(u32, Box<Direct>),
-    GetLocal(u32),
+    SetLocal(Local, Box<Direct>),
+    GetLocal(Local),
     GetGlobal(Global),
     Seq(Box<Direct>, Box<Direct>),
     Label(Box<Direct>),
@@ -92,7 +137,7 @@ impl Direct {
             Direct::INumOp(w, op, a, b) => f(Direct::INumOp(w, op, Box::new(f(*a)), Box::new(f(*b)))),
             Direct::ICompOp(w, op, a, b) => f(Direct::ICompOp(w, op, Box::new(f(*a)), Box::new(f(*b)))),
             Direct::Seq(a, b) => f(Direct::Seq(Box::new(f(*a)), Box::new(f(*b)))),
-            Direct::Store(a, b) => f(Direct::Store(Box::new(f(*a)), Box::new(f(*b)))),
+            Direct::Store(t, a, b) => f(Direct::Store(t, Box::new(f(*a)), Box::new(f(*b)))),
             Direct::SetLocal(u, x) => f(Direct::SetLocal(u, Box::new(f(*x)))),
             Direct::Load(t, p) => f(Direct::Load(t, Box::new(f(*p)))),
             Direct::Label(a) => f(Direct::Label(Box::new(f(*a)))),
@@ -104,7 +149,7 @@ impl Direct {
             Direct::INumOp(w, op, a, b) => f(Direct::INumOp(w, op, Box::new(f(*a)), Box::new(f(*b)))),
             Direct::ICompOp(w, op, a, b) => f(Direct::ICompOp(w, op, Box::new(f(*a)), Box::new(f(*b)))),
             Direct::Seq(a, b) => f(Direct::Seq(Box::new(f(*a)), Box::new(f(*b)))),
-            Direct::Store(a, b) => f(Direct::Store(Box::new(f(*a)), Box::new(f(*b)))),
+            Direct::Store(t, a, b) => f(Direct::Store(t, Box::new(f(*a)), Box::new(f(*b)))),
             Direct::SetLocal(u, x) => f(Direct::SetLocal(u, Box::new(f(*x)))),
             Direct::Load(t, p) => f(Direct::Load(t, Box::new(f(*p)))),
             x => f(x),
@@ -112,12 +157,14 @@ impl Direct {
     }
     fn fold_leaves<T>(&self, start: T, f: &impl Fn(T, &Self) -> T) -> T {
         match self {
-            Direct::Seq(a, b) | Direct::INumOp(_, _, a, b) | Direct::ICompOp(_, _, a, b) | Direct::If { t: a, f: b, .. } | Direct::Store(a, b) => b.fold_leaves(a.fold_leaves(start, f), f),
+            Direct::Seq(a, b) | Direct::INumOp(_, _, a, b) | Direct::ICompOp(_, _, a, b) | Direct::If { t: a, f: b, .. } | Direct::Store(_, a, b) => b.fold_leaves(a.fold_leaves(start, f), f),
             Direct::SetLocal(_, x) | Direct::Load(_, x) => x.fold_leaves(start, f),
             x => f(start, x),
         }
     }
+}
 
+impl Direct {
     fn nest(self, max: u32) -> Self {
         self.map_no_lbl(|x| match x {
             Direct::Br(i) if i >= max => Direct::Br(i + 1),
@@ -169,7 +216,7 @@ impl Direct {
     /// This function may clone `x`.
     fn insert(self, x: Self, offset: u32) -> Self {
         match &self {
-            Direct::INumOp(_,_,_,_) | Direct::ICompOp(_,_,_,_) | Direct::SetLocal(_,_) | Direct::Load(_, _) | Direct::Store(_, _) if self.br().is_some() => panic!("Branches are currently not supported in arguments to expressions"),
+            Direct::INumOp(_,_,_,_) | Direct::ICompOp(_,_,_,_) | Direct::SetLocal(_,_) | Direct::Load(_, _) | Direct::Store(_, _, _) if self.br().is_some() => panic!("Branches are currently not supported in arguments to expressions"),
             _ => (),
         }
         match self {
@@ -220,7 +267,7 @@ impl Direct {
                     Base::Seq(Box::new(a.base()), Box::new(b.base()))
                 }
             }
-            Direct::Store(a, b) => Base::Store(Box::new(a.base()), Box::new(b.base())),
+            Direct::Store(t, a, b) => Base::Store(t, Box::new(a.base()), Box::new(b.base())),
             Direct::SetLocal(l, v) => Base::SetLocal(l, Box::new(v.base())),
             Direct::Load(t, p) => Base::Load(t, Box::new(p.base())),
         }
@@ -228,9 +275,9 @@ impl Direct {
 }
 
 #[derive(Debug)]
-struct Fun<T> {
-    params: Vec<wasm::ValueType>,
-    body: T,
+pub struct Fun<T> {
+    pub params: Vec<wasm::ValueType>,
+    pub body: T,
 }
 
 pub fn test(w: &wasm::Module) {
@@ -293,6 +340,8 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
 
         let code = body.code();
 
+        let locals = body.locals();
+
         macro_rules! numop {
             ($w:ident, $op:ident) => {{
                 let a = stack.pop().unwrap();
@@ -315,7 +364,8 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                 Nop => (),
                 SetLocal(u) => {
                     let val = stack.pop().unwrap();
-                    blocks.last_mut().unwrap().push(Direct::SetLocal(*u, Box::new(val)));
+                    let ty = locals[*u as usize].value_type();
+                    blocks.last_mut().unwrap().push(Direct::SetLocal(Local { ty, idx: *u }, Box::new(val)));
                 }
                 I32Load(_, _) => {
                     let val = stack.pop().unwrap();
@@ -324,10 +374,13 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                 I32Store(_, _) => {
                     let val = stack.pop().unwrap();
                     let ptr = stack.pop().unwrap();
-                    blocks.last_mut().unwrap().push(Direct::Store(Box::new(ptr), Box::new(val)))
+                    blocks.last_mut().unwrap().push(Direct::Store(wasm::ValueType::I32, Box::new(ptr), Box::new(val)))
                 }
                 GetGlobal(idx) => stack.push(Direct::GetGlobal(Global { ty: globals[*idx as usize], idx: *idx })),
-                GetLocal(u) => stack.push(Direct::GetLocal(*u)),
+                GetLocal(u) => {
+                    let ty = locals[*u as usize].value_type();
+                    stack.push(Direct::GetLocal(Local { ty, idx: *u }))
+                }
                 I32Const(i) => stack.push(Direct::Const(Const::I32(*i))),
                 I64Const(i) => stack.push(Direct::Const(Const::I64(*i))),
                 F32Const(i) => stack.push(Direct::Const(Const::F32(f32::from_bits(*i)))),
