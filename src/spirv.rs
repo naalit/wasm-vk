@@ -417,7 +417,7 @@ pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
     let data = b.variable(ptr_data_t, None, spvh::StorageClass::Uniform, None);
 
     b.buffer = data;
-
+    
     b.decorate(data_t, spvh::Decoration::BufferBlock, []);
     b.decorate(
         data,

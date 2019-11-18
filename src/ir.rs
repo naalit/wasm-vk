@@ -184,21 +184,15 @@ impl Direct {
     /// of `Seq`s they can branch out of, above this code?
     /// In `Seq(a, b)`, if `a.br().is_some()`, then `a` might branch out of the `Seq`.
     ///
-    /// Example:
-    /// ```
-    /// use playground::*;
-    /// let d = parse("{ br 2 }");
-    /// // 1, not 2, because one of the `Seqs` has "already" been branched out of
-    /// assert_eq!(d.br(), Some(1));
-    /// ```
+    /// For example, `<(block (br 2))>.br() == Some(1)`
     pub fn br(&self) -> Option<u32> {
-        self.fold_leaves(None, &|acc, x| {println!("br of {:?}", x); match (acc, x) {
+        self.fold_leaves(None, &|acc, x| match (acc, x) {
             (None, Direct::Br(i)) => Some(*i),
             (Some(a), Direct::Br(b)) => Some(a.max(*b)),
             (None, Direct::Label(a)) => a.br().and_then(|x| x.checked_sub(1)),
             (Some(q), Direct::Label(a)) => Some(a.br().and_then(|x| x.checked_sub(1)).map_or(q, |x| x.max(q))),
             (acc, _) => acc,
-        }})
+        })
     }
 
     fn replace_br(self, with: Self, offset: u32) -> Self {
@@ -286,6 +280,11 @@ pub fn test(w: &wasm::Module) {
     println!("Base: {:#?}", d.into_iter().map(|Fun {params, body}| Fun { params, body: body.base() }).collect::<Vec<_>>());
 }
 
+pub fn to_base(w: &wasm::Module) -> Vec<Fun<Base>> {
+    let d = direct(w);
+    d.into_iter().map(|Fun {params, body}| Fun { params, body: body.base() }).collect()
+}
+
 fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
     let imports = w.import_section().map_or_else(Vec::new, |x| x.entries().to_vec());
     let mut globals: Vec<_> = imports.iter().map(|x| x.external()).filter_map(|x| if let wasm::External::Global(g) = x { Some(*g) } else { None }).collect();
@@ -340,19 +339,21 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
 
         let code = body.code();
 
-        let locals = body.locals();
+        let locals: Vec<_> = body.locals().iter().flat_map(|x| (0..x.count()).map(move |_| x)).collect();
 
         macro_rules! numop {
             ($w:ident, $op:ident) => {{
-                let a = stack.pop().unwrap();
+                // They're on the stack as [a, b], so pop b and then a
                 let b = stack.pop().unwrap();
+                let a = stack.pop().unwrap();
                 stack.push(Direct::INumOp(Width::$w, INumOp::$op, Box::new(a), Box::new(b)));
             }}
         }
         macro_rules! compop {
             ($w:ident, $op:ident) => {{
-                let a = stack.pop().unwrap();
+                // They're on the stack as [a, b], so pop b and then a
                 let b = stack.pop().unwrap();
+                let a = stack.pop().unwrap();
                 stack.push(Direct::ICompOp(Width::$w, ICompOp::$op, Box::new(a), Box::new(b)));
             }}
         }

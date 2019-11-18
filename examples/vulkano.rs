@@ -23,7 +23,14 @@ fn main() {
     // It multiplies every number by 12 and adds 3
     let w = wasm::deserialize_file("examples/comp.wasm").unwrap();
 
-    wasm_vk::ir::test(&w);
+    // wasm_vk::ir::test(&w);
+    let base = ir::to_base(&w);
+    let mut ctx = sr::Ctx::new();
+    for f in base {
+        ctx.fun(f);
+    }
+    let m = ctx.finish(w.start_section());
+    let spv = sr::module_bytes(m);
 
     // // Read SPIR-V from file instead of generating it - for debugging
     // let spv = {
@@ -35,7 +42,7 @@ fn main() {
     // };
 
     // First, we generate SPIR-V
-    let spv = spirv::to_spirv(w.clone());
+    // let spv = spirv::to_spirv(w.clone());
 
     // We write the SPIR-V to disk so we can disassemble it later if we want
     use std::io::Write;
