@@ -1,508 +1,452 @@
-use rspirv::binary::*;
-use rspirv::dr::*;
+use crate::*;
+use rspirv::dr;
 use spirv_headers as spvh;
 
-use std::collections::HashMap;
-struct SBuilder {
-    b: Builder,
-    locals: Vec<spvh::Word>,
-    table: HashMap<SType, spvh::Word>,
-    buffer: spvh::Word,
-    idx: spvh::Word,
+trait S {
+    type Value;
+    type Ctx;
+    fn spv(self, ctx: &mut Self::Ctx) -> Self::Value;
 }
-impl SBuilder {
-    fn new(b: Builder) -> SBuilder {
-        SBuilder {
-            b,
-            locals: Vec::new(),
-            table: HashMap::new(),
+
+#[derive(Default)]
+struct Types {
+    b: Option<u32>,
+    i_32: Option<u32>,
+    s_32: Option<u32>,
+    i_64: Option<u32>,
+    s_64: Option<u32>,
+    f_32: Option<u32>,
+    f_64: Option<u32>,
+}
+
+use std::collections::HashMap;
+
+#[derive(Debug, Copy, Clone)]
+struct Loop {
+    head: u32,
+    cont: u32,
+    end: u32,
+}
+
+#[derive(Default)]
+pub struct Ctx {
+    tys: Types,
+    ptrs: HashMap<(wasm::ValueType, spvh::StorageClass), u32>,
+    buffer: u32,
+    /// The x component of the thread id - unique to a function
+    thread_id: u32,
+    /// The thread id uvec3 - global
+    thread_id_v3: u32,
+    locals: Vec<u32>,
+    b: dr::Builder,
+    funs: Vec<u32>,
+    loops: Vec<Loop>,
+}
+impl Ctx {
+    pub fn new() -> Self {
+        let mut b = dr::Builder::new();
+
+        b.set_version(1, 0);
+        b.capability(spvh::Capability::Shader);
+        b.ext_inst_import("GLSL.std.450");
+        b.memory_model(spvh::AddressingModel::Logical, spvh::MemoryModel::GLSL450);
+
+        // A temporary context mostly so we can use the type cache
+        let mut c = Ctx {
+            tys: Default::default(),
+            ptrs: Default::default(),
             buffer: 0,
-            idx: 0,
+            thread_id: 0,
+            thread_id_v3: 0,
+            locals: Vec::new(),
+            b,
+            funs: Vec::new(),
+            loops: Vec::new(),
+        };
+
+        let t_uint = c.get(wasm::ValueType::I32);
+        let t_arr = c.type_runtime_array(t_uint);
+        let t_struct = c.type_struct([t_arr]);
+        let t_ptr = c.type_pointer(None, spvh::StorageClass::Uniform, t_struct);
+        let buffer = c.variable(t_ptr, None, spvh::StorageClass::Uniform, None);
+
+        // This is deprecated past SPIR-V 1.3, and should be replaced with the StorageBuffer StorageClass.
+        // I don't know that any Vulkan implementations actually support that yet, though, so this works for now.
+        c.decorate(t_struct, spvh::Decoration::BufferBlock, []);
+        // Set 0, binding 0
+        c.decorate(
+            buffer,
+            spvh::Decoration::DescriptorSet,
+            [dr::Operand::LiteralInt32(0)],
+        );
+        c.decorate(buffer, spvh::Decoration::Binding, [dr::Operand::LiteralInt32(0)]);
+        c.decorate(
+            t_arr,
+            spvh::Decoration::ArrayStride,
+            [dr::Operand::LiteralInt32(4)],
+        );
+        c.member_decorate(
+            t_struct,
+            0,
+            spvh::Decoration::Offset,
+            [dr::Operand::LiteralInt32(0)],
+        );
+
+        let t_uvec3 = c.type_vector(t_uint, 3);
+        let t_uvec3_ptr = c.type_pointer(None, spvh::StorageClass::Input, t_uvec3);
+        let thread_id_v3 = c.variable(t_uvec3_ptr, None, spvh::StorageClass::Input, None);
+        c.decorate(
+            thread_id_v3,
+            spvh::Decoration::BuiltIn,
+            [dr::Operand::BuiltIn(spvh::BuiltIn::GlobalInvocationId)],
+        );
+
+        Ctx {
+            buffer,
+            thread_id_v3,
+            .. c
         }
     }
-    fn ty(&mut self, t: SType) -> spvh::Word {
-        t.spirv(self)
+
+    pub fn fun(&mut self, f: ir::Fun<ir::Base>) {
+        let ir::Fun {params, body} = f;
+        let locals = body.locals();
+
+        // TODO return type
+        // TODO parameters
+        let void = self.type_void();
+        let t = self.type_function(void, []);
+        let fun = self.begin_function(void, None, spvh::FunctionControl::NONE, t).unwrap();
+        self.begin_basic_block(None).unwrap();
+
+        let mut max = 0;
+        let mut locals_m = HashMap::new();
+        for l in locals {
+            let ty = l.ty;
+            let ty = self.ptr(ty, spvh::StorageClass::Function);
+            let n = self.variable(ty, None, spvh::StorageClass::Function, None);
+            locals_m.insert(l.idx, n);
+            max = l.idx.max(max);
+        }
+
+        // TODO make this more robust
+        self.locals = (0..=max).map(|x| *locals_m.get(&x).unwrap_or(&0)).collect();
+
+        // We need to initialize `self.thread_id` from `self.thread_id_v3`
+        let t_uint = self.get(wasm::ValueType::I32);
+        let t_uint_ptr = self.type_pointer(None, spvh::StorageClass::Input, t_uint);
+        let const_0 = self.constant_u32(t_uint, 0);
+        let thread_id_v3 = self.thread_id_v3;
+        let thread_id = self.access_chain(t_uint_ptr, None, thread_id_v3, [const_0]).unwrap();
+        let thread_id = self.load(t_uint, None, thread_id, None, []).unwrap();
+        self.thread_id = thread_id;
+
+        // Now compile the body
+        body.spv(self);
+
+        self.ret().unwrap();
+        self.end_function().unwrap();
+
+        self.funs.push(fun);
+    }
+
+    pub fn finish(mut self, entry: Option<u32>) -> dr::Module {
+        if let Some(entry) = entry {
+            let entry = self.funs[entry as usize];
+
+            let id = self.thread_id_v3;
+            self.entry_point(spvh::ExecutionModel::GLCompute, entry, "main", [id]);
+            self.execution_mode(entry, spvh::ExecutionMode::LocalSize, [64, 1, 1]);
+        }
+        self.b.module()
+    }
+
+    fn bool(&mut self) -> u32 {
+        if let Some(i) = self.tys.b {
+            i
+        } else {
+            let i = self.type_bool();
+            self.tys.b = Some(i);
+            i
+        }
+    }
+
+    fn signed(&mut self, width: ir::Width) -> u32 {
+        match width {
+            ir::Width::W32 => if let Some(i) = self.tys.s_32 {
+                i
+            } else {
+                let i = self.type_int(32, 1);
+                self.tys.s_32 = Some(i);
+                i
+            }
+            ir::Width::W64 => if let Some(i) = self.tys.s_64 {
+                i
+            } else {
+                let i = self.type_int(64, 1);
+                self.tys.s_64 = Some(i);
+                i
+            }
+        }
+    }
+
+    fn int(&mut self, width: ir::Width) -> u32 {
+        match width {
+            ir::Width::W32 => self.get(wasm::ValueType::I32),
+            ir::Width::W64 => self.get(wasm::ValueType::I64),
+        }
+    }
+
+    fn ptr(&mut self, t: wasm::ValueType, class: spvh::StorageClass) -> u32 {
+        if let Some(i) = self.ptrs.get(&(t, class)) {
+            *i
+        } else {
+            let i = self.get(t);
+            let i = self.type_pointer(None, class, i);
+            self.ptrs.insert((t, class), i);
+            i
+        }
+    }
+
+    fn get(&mut self, t: wasm::ValueType) -> u32 {
+        match t {
+            wasm::ValueType::I32 => if let Some(i) = self.tys.i_32 {
+                i
+            } else {
+                let i = self.type_int(32, 0);
+                self.tys.i_32 = Some(i);
+                i
+            }
+            wasm::ValueType::I64 => if let Some(i) = self.tys.i_64 {
+                i
+            } else {
+                let i = self.type_int(64, 0);
+                self.tys.i_64 = Some(i);
+                i
+            }
+            wasm::ValueType::F32 => if let Some(i) = self.tys.f_32 {
+                i
+            } else {
+                let i = self.type_float(32);
+                self.tys.f_32 = Some(i);
+                i
+            }
+            wasm::ValueType::F64 => if let Some(i) = self.tys.f_64 {
+                i
+            } else {
+                let i = self.type_float(64);
+                self.tys.f_64 = Some(i);
+                i
+            }
+        }
     }
 }
-impl std::ops::Deref for SBuilder {
-    type Target = Builder;
-    fn deref(&self) -> &Builder {
+use std::ops::{Deref, DerefMut};
+impl Deref for Ctx {
+    type Target = dr::Builder;
+    fn deref(&self) -> &dr::Builder {
         &self.b
     }
 }
-impl std::ops::DerefMut for SBuilder {
-    fn deref_mut(&mut self) -> &mut Builder {
+impl DerefMut for Ctx {
+    fn deref_mut(&mut self) -> &mut dr::Builder {
         &mut self.b
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Hash)]
-enum SType {
-    Bool,
-    Uint,
-    Float,
-    Ptr(Box<SType>, spvh::StorageClass),
-    Struct(Vec<SType>),
-    RuntimeArray(Box<SType>),
-    Vector(Box<SType>, u32),
-    None,
-}
-impl SType {
-    fn spirv(&self, b: &mut SBuilder) -> spvh::Word {
-        if let Some(t) = b.table.get(self) {
-            return *t;
-        }
-        let t = match self {
-            SType::Bool => b.type_bool(),
-            SType::Ptr(x, c) => {
-                let x = x.spirv(b);
-                b.type_pointer(None, *c, x)
-            }
-            SType::Uint => b.type_int(32, 0),
-            SType::Float => b.type_float(32),
-            SType::Struct(v) => {
-                let mut v2 = Vec::with_capacity(v.len());
-                for i in v {
-                    v2.push(i.spirv(b));
-                }
-                b.type_struct(v2)
-            }
-            SType::RuntimeArray(x) => {
-                let x = x.spirv(b);
-                b.type_runtime_array(x)
-            }
-            SType::Vector(x, n) => {
-                let x = x.spirv(b);
-                b.type_vector(x, *n)
-            }
-            SType::None => 0,
-        };
-        b.table.insert(self.clone(), t);
-        t
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Value {
-    val: spvh::Word,
-    ty: SType,
-}
-impl std::ops::Deref for Value {
-    type Target = spvh::Word;
-    fn deref(&self) -> &spvh::Word {
-        &self.val
-    }
-}
-
-impl Into<SType> for WasmTy {
-    fn into(self) -> SType {
+impl S for ir::Base {
+    type Ctx = Ctx;
+    type Value = u32;
+    fn spv(self, ctx: &mut Ctx) -> u32 {
         match self {
-            // We don't actually support 64-bit ints or floats
-            WasmTy::I32 => SType::Uint,
-            WasmTy::I64 => SType::Uint,
-            WasmTy::F32 => SType::Float,
-            WasmTy::F64 => SType::Float,
-        }
-    }
-}
-
-use crate::*;
-
-#[derive(Debug)]
-enum BlockData {
-    Loop {
-        head: u32,
-        cont: u32,
-        end: u32,
-    },
-    If {
-        t: u32,
-        f: u32,
-        end: u32,
-    },
-    /// A block that must branch to 'end' after completing 'block'
-    Shim {
-        block: Box<BlockData>,
-        end: u32,
-    },
-}
-
-impl Visitor for SBuilder {
-    type Output = Value;
-    type BlockData = BlockData;
-
-    fn br_continue(&mut self, blocks: &mut [Self::BlockData]) {
-        match blocks.last().unwrap() {
-            BlockData::Loop { cont, .. } => {
-                self.branch(*cont).unwrap();
-                // Useless basic block that will never be executed
-                self.begin_basic_block(None).unwrap();
+            ir::Base::Nop => 0,
+            ir::Base::INumOp(w, op, a, b) => {
+                let a = a.spv(ctx);
+                let b = b.spv(ctx);
+                let ty = ctx.int(w);
+                match op {
+                    ir::INumOp::Mul => ctx.i_mul(ty, None, a, b).unwrap(),
+                    ir::INumOp::Add => ctx.i_add(ty, None, a, b).unwrap(),
+                    ir::INumOp::Sub => ctx.i_sub(ty, None, a, b).unwrap(),
+                    ir::INumOp::DivU => ctx.u_div(ty, None, a, b).unwrap(),
+                    ir::INumOp::DivS => {
+                        let sty = ctx.signed(w);
+                        let a = ctx.bitcast(sty, None, a).unwrap();
+                        let b = ctx.bitcast(sty, None, b).unwrap();
+                        ctx.s_div(sty, None, a, b).unwrap()
+                    }
+                }
             }
-            _ => panic!("Non loop continue"),
-        }
-    }
+            ir::Base::ICompOp(w, op, a, b) => {
+                let a = a.spv(ctx);
+                let b = b.spv(ctx);
+                let ty = ctx.int(w);
+                // Unlike WASM, SPIR-V has booleans
+                // So we convert them to integers immediately
+                let t_bool = ctx.bool();
 
-    fn br_break(&mut self, blocks: &mut [BlockData]) {
-        let mut last_end = None;
-        for i in 0..blocks.len() {
-            let end = match &mut blocks[i] {
-                BlockData::Loop { end, .. } => end,
-                BlockData::If { end, .. } => end,
-                BlockData::Shim { end, .. } => end,
-            };
-            let end2 = *end;
-
-            if let Some(last_end) = last_end {
-                // This block has a child, so we change the parent's end block to the child's old end block
-                //  and redirect it with a shim to our old end block.
-                //
-                // When the child block finishes, it will branch to our end block, which is now
-                //  the block the child declared as its merge block. Then, it will branch to the
-                //  block that the parent declared as its merge block before continuing. So,
-                //  both blocks fulfill their promises
-                let block = &mut blocks[i];
-                let mut block2 = BlockData::If { t: 0, f: 0, end: 0 };
-                std::mem::swap(block, &mut block2);
-                *block = match block2 {
-                    BlockData::Loop { end, head, cont } => BlockData::Shim {
-                        block: Box::new(BlockData::Loop {
-                            head,
-                            cont,
-                            end: last_end,
-                        }),
-                        end,
-                    },
-                    BlockData::If { t, f, end } => BlockData::Shim {
-                        block: Box::new(BlockData::If {
-                            t,
-                            f,
-                            end: last_end,
-                        }),
-                        end,
-                    },
-                    BlockData::Shim { block, end } => BlockData::Shim {
-                        block: Box::new(BlockData::Shim {
-                            block,
-                            end: last_end,
-                        }),
-                        end,
-                    },
+                let b = match op {
+                    ir::ICompOp::Eq => ctx.i_equal(t_bool, None, a, b).unwrap(),
+                    ir::ICompOp::NEq => ctx.i_not_equal(t_bool, None, a, b).unwrap(),
+                    ir::ICompOp::LeU => ctx.u_less_than_equal(t_bool, None, a, b).unwrap(),
+                    ir::ICompOp::GeU => ctx.u_greater_than_equal(t_bool, None, a, b).unwrap(),
+                    ir::ICompOp::LeS => {
+                        let sty = ctx.signed(w);
+                        let a = ctx.bitcast(sty, None, a).unwrap();
+                        let b = ctx.bitcast(sty, None, b).unwrap();
+                        ctx.s_less_than_equal(sty, None, a, b).unwrap()
+                    }
+                    ir::ICompOp::GeS => {
+                        let sty = ctx.signed(w);
+                        let a = ctx.bitcast(sty, None, a).unwrap();
+                        let b = ctx.bitcast(sty, None, b).unwrap();
+                        ctx.s_greater_than_equal(sty, None, a, b).unwrap()
+                    }
                 };
-            } else {
-                // This is the innermost block, so branch to the old 'end' and set the new end to a new block
-                self.branch(*end).unwrap();
-                *end = self.id();
-                self.begin_basic_block(None).unwrap();
+
+                let zero = ctx.constant_u32(ty, 0);
+                let one = ctx.constant_u32(ty, 1);
+                ctx.select(ty, None, b, one, zero).unwrap()
             }
-            last_end = Some(end2);
-        }
-    }
+            ir::Base::Const(ir::Const::I32(i)) => {
+                let ty = ctx.get(wasm::ValueType::I32);
+                ctx.constant_u32(ty, unsafe { std::mem::transmute(i) })
+            }
+            ir::Base::Const(ir::Const::F32(i)) => {
+                let ty = ctx.get(wasm::ValueType::F32);
+                ctx.constant_f32(ty, i)
+            }
+            ir::Base::Const(_) => panic!("We currently don't support 64-bit constants"),
+            ir::Base::Seq(a, b) => {
+                a.spv(ctx);
+                b.spv(ctx)
+            }
+            ir::Base::GetLocal(l) => {
+                let ty = ctx.get(l.ty);
+                let l = ctx.locals[l.idx as usize];
+                ctx.load(ty, None, l, None, []).unwrap()
+            }
+            ir::Base::SetLocal(l, val) => {
+                let l = ctx.locals[l.idx as usize];
+                let val = val.spv(ctx);
+                ctx.store(l, val, None, []).unwrap();
+                0
+            }
+            ir::Base::GetGlobal(g) => {
+                assert_eq!(g, ir::Global { ty: wasm::GlobalType::new(wasm::ValueType::I32, false), idx: 0 });
+                ctx.thread_id
+            }
+            ir::Base::Load(ty, ptr) => {
+                let uint = ctx.get(wasm::ValueType::I32);
+                let c0 = ctx.constant_u32(uint, 0);
 
-    fn start_block(&mut self, op: BlockOp<Value>) -> BlockData {
-        match op {
-            BlockOp::Loop => {
-                let head = self.id();
-                let cont = self.id();
-                let end = self.id();
-                let body = self.id();
+                let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Uniform);
+                let ty = ctx.get(ty);
+                let ptr = ptr.spv(ctx);
+                // Divide by four because of the size of a u32
+                let c4 = ctx.constant_u32(uint, 4);
+                let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
 
-                self.branch(head).unwrap();
-                self.begin_basic_block(Some(head)).unwrap();
-                self.loop_merge(end, cont, spvh::LoopControl::NONE, [])
+                let buf = ctx.buffer;
+                let ptr = ctx.access_chain(ptr_ty, None, buf, [c0, ptr]).unwrap();
+                ctx.load(ty, None, ptr, None, []).unwrap()
+            }
+            ir::Base::Store(ty, ptr, val) => {
+                let uint = ctx.get(wasm::ValueType::I32);
+                let c0 = ctx.constant_u32(uint, 0);
+
+                let val = val.spv(ctx);
+
+                let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Uniform);
+                let ptr = ptr.spv(ctx);
+                // Divide by four because of the size of a u32
+                let c4 = ctx.constant_u32(uint, 4);
+                let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
+
+                let buf = ctx.buffer;
+                let ptr = ctx.access_chain(ptr_ty, None, buf, [c0, ptr]).unwrap();
+                ctx.store(ptr, val, None, []).unwrap();
+                0
+            }
+            ir::Base::If { cond, t, f } => {
+                let l_t = ctx.id();
+                let l_f = ctx.id();
+                let l_m = ctx.id();
+
+                let cond = cond.spv(ctx);
+                // `cond` is a number, so to turn it into a boolean we do `cond != 0`
+                let t_uint = ctx.get(wasm::ValueType::I32);
+                let c0 = ctx.constant_u32(t_uint, 0);
+                let t_bool = ctx.bool();
+                let cond = ctx.i_not_equal(t_bool, None, cond, c0).unwrap();
+
+                ctx.selection_merge(l_m, spvh::SelectionControl::NONE).unwrap();
+                ctx.branch_conditional(cond, l_t, l_f, []).unwrap();
+                ctx.begin_basic_block(Some(l_t)).unwrap();
+                t.spv(ctx);
+                ctx.branch(l_m).unwrap();
+                ctx.begin_basic_block(Some(l_f)).unwrap();
+                f.spv(ctx);
+                ctx.branch(l_m).unwrap();
+                ctx.begin_basic_block(Some(l_m)).unwrap();
+                
+                0
+            },
+            ir::Base::Loop(a) => {
+                let head = ctx.id();
+                let cont = ctx.id();
+                let end = ctx.id();
+                let body = ctx.id();
+
+                ctx.branch(head).unwrap();
+                ctx.begin_basic_block(Some(head)).unwrap();
+                ctx.loop_merge(end, cont, spvh::LoopControl::NONE, [])
                     .unwrap();
-                self.branch(body).unwrap();
-                self.begin_basic_block(Some(body)).unwrap();
+                ctx.branch(body).unwrap();
+                ctx.begin_basic_block(Some(body)).unwrap();
 
-                BlockData::Loop { head, end, cont }
-            }
-            BlockOp::If(cond) => {
-                let uint = self.ty(SType::Uint);
-                let t_bool = self.ty(SType::Bool);
-                // `cond` is an i32, so we branch if it isn't zero
-                let zero = self.constant_u32(uint, 0);
-                let b = self.i_equal(t_bool, None, **cond, zero).unwrap();
+                ctx.loops.push(Loop { head, cont, end });
 
-                let t_lbl = self.id();
-                let f_lbl = self.id();
-                let end_lbl = self.id();
-                self.selection_merge(end_lbl, spvh::SelectionControl::NONE)
-                    .unwrap();
-                // b is `cond == 0`, so we swap true and false here
-                self.branch_conditional(b, f_lbl, t_lbl, []).unwrap();
-                self.begin_basic_block(Some(t_lbl)).unwrap();
-                BlockData::If {
-                    t: t_lbl,
-                    f: f_lbl,
-                    end: end_lbl,
-                }
-            }
-        }
-    }
+                a.spv(ctx);
 
-    fn else_block(&mut self, data: BlockData) -> BlockData {
-        match data {
-            BlockData::If { end, f, t } => {
-                self.branch(end).unwrap();
-                self.begin_basic_block(Some(f)).unwrap();
-                data
-            }
-            BlockData::Shim { block, end } => {
-                let block = self.else_block(*block);
-                BlockData::Shim {
-                    block: Box::new(block),
-                    end,
-                }
-            }
-            BlockData::Loop { .. } => panic!("Else blocks not allowed for loops!"),
-        }
-    }
+                ctx.loops.pop().unwrap();
 
-    fn end_block(&mut self, data: BlockData) {
-        match data {
-            BlockData::If { end, .. } => {
-                self.branch(end).unwrap();
-                self.begin_basic_block(Some(end)).unwrap();
-            }
-            BlockData::Shim { block, end } => {
-                self.end_block(*block);
-                self.branch(end).unwrap();
-                self.begin_basic_block(Some(end)).unwrap();
-            }
-            BlockData::Loop { end, cont, head } => {
                 // For WASM loops, the default behaviour is to break out of a loop at the end
-                self.branch(end).unwrap();
+                ctx.branch(end).unwrap();
 
                 // SPIR-V requires the continue block to be after the rest of the loop
-                self.begin_basic_block(Some(cont)).unwrap();
-                self.branch(head).unwrap();
+                ctx.begin_basic_block(Some(cont)).unwrap();
+                ctx.branch(head).unwrap();
 
-                self.begin_basic_block(Some(end)).unwrap();
+                ctx.begin_basic_block(Some(end)).unwrap();
+
+                0
+            }
+            ir::Base::Continue => {
+                let l = *ctx.loops.last().unwrap();
+                ctx.branch(l.cont).unwrap();
+                ctx.begin_basic_block(None).unwrap();
+                0
+            }
+            ir::Base::Break => {
+                let l = *ctx.loops.last().unwrap();
+                ctx.branch(l.end).unwrap();
+                ctx.begin_basic_block(None).unwrap();
+                0
+            }
+            ir::Base::Return => {
+                ctx.ret().unwrap();
+                // Unreacheable block
+                ctx.begin_basic_block(None).unwrap();
+                0
             }
         }
-    }
-
-    fn add_local(&mut self, ty: WasmTy, val: Option<Value>) {
-        let var_ty = SType::Ptr(Box::new(ty.into()), spvh::StorageClass::Function);
-        let var_ty = self.ty(var_ty);
-        let var = self.variable(var_ty, None, spvh::StorageClass::Function, None);
-        if let Some(val) = val {
-            self.store(var, *val, None, []).unwrap();
-        }
-        self.locals.push(var);
-    }
-
-    fn init(&mut self) {
-        let uint = self.ty(SType::Uint);
-        let ptr_uint_i = self.ty(SType::Ptr(Box::new(SType::Uint), spvh::StorageClass::Input));
-        let const_0 = self.constant_u32(uint, 0);
-        let idx = self.idx;
-        let idx = self.access_chain(ptr_uint_i, None, idx, [const_0]).unwrap();
-        self.idx = self.load(uint, None, idx, None, []).unwrap();
-    }
-
-    fn visit(&mut self, op: AOp<Value>) -> Value {
-        use AOp::*;
-
-        let uint = SType::Uint.spirv(self);
-
-        let (v, t) = match op {
-            Return => {
-                self.ret().unwrap();
-                // Unreachable block
-                self.begin_basic_block(None).unwrap();
-                (0, SType::None)
-            }
-            GetGlobalImport(module, field) => {
-                if module != "spv" {
-                    panic!("Unknown namespace {}", module);
-                }
-                match &*field {
-                    "id" => (self.idx, SType::Uint),
-                    _ => panic!("Unknown global {}", field),
-                }
-            }
-            GetLocal(l) => {
-                let l = self.locals[l as usize];
-                let r = self.load(uint, None, l, None, []).unwrap();
-                (r, SType::Uint)
-            }
-            SetLocal(l, v) => {
-                let l = self.locals[l as usize];
-                self.store(l, *v.val, None, []).unwrap();
-                (0, SType::None)
-            }
-            LeU(a, b) => {
-                // Unlike WASM, SPIR-V has booleans
-                // So we convert them to integers immediately
-                let t_bool = self.ty(SType::Bool);
-                let b = self.u_less_than_equal(t_bool, None, **a, **b).unwrap();
-                let zero = self.constant_u32(uint, 0);
-                let one = self.constant_u32(uint, 1);
-                let r = self.select(uint, None, b, one, zero).unwrap();
-                (r, SType::Uint)
-            }
-            Eq(a, b) => {
-                // Unlike WASM, SPIR-V has booleans
-                // So we convert them to integers immediately
-                let t_bool = self.ty(SType::Bool);
-                let b = self.i_equal(t_bool, None, **a, **b).unwrap();
-                let zero = self.constant_u32(uint, 0);
-                let one = self.constant_u32(uint, 1);
-                let r = self.select(uint, None, b, one, zero).unwrap();
-                (r, SType::Uint)
-            }
-            Mul(a, b) => (self.i_mul(uint, None, **a, **b).unwrap(), SType::Uint),
-            Add(a, b) => (self.i_add(uint, None, **a, **b).unwrap(), SType::Uint),
-            I32Const(x) => (self.constant_u32(uint, x), SType::Uint),
-            Load(x) => {
-                let ptr = self.buffer;
-                let p_uint_u = self.ty(SType::Ptr(
-                    Box::new(SType::Uint),
-                    spvh::StorageClass::Uniform,
-                ));
-                let c0 = self.constant_u32(uint, 0);
-                let c4 = self.constant_u32(uint, 4);
-                let x = self.u_div(uint, None, *x.val, c4).unwrap();
-                let ptr = self.access_chain(p_uint_u, None, ptr, [c0, x]).unwrap();
-                let r = self.load(uint, None, ptr, None, []).unwrap();
-                (r, SType::Uint)
-            }
-            Store(p, x) => {
-                let ptr = self.buffer;
-                let p_uint_u = self.ty(SType::Ptr(
-                    Box::new(SType::Uint),
-                    spvh::StorageClass::Uniform,
-                ));
-                let c0 = self.constant_u32(uint, 0);
-                let c4 = self.constant_u32(uint, 4);
-                let p = self.u_div(uint, None, *p.val, c4).unwrap();
-                let ptr = self.access_chain(p_uint_u, None, ptr, [c0, p]).unwrap();
-                self.store(ptr, *x.val, None, []).unwrap();
-                (0, SType::None)
-            }
-        };
-        Value { val: v, ty: t }
     }
 }
 
-pub fn to_spirv(w: wasm::Module) -> Vec<u8> {
-    let main_idx = w.start_section().expect("No 'start' function in module!");
+pub fn module_bytes(m: dr::Module) -> Vec<u8> {
+    use rspirv::binary::Assemble;
 
-    let mut b = Builder::new();
-    b.set_version(1, 0);
-    b.capability(spvh::Capability::Shader);
-    b.ext_inst_import("GLSL.std.450");
-    b.memory_model(spvh::AddressingModel::Logical, spvh::MemoryModel::GLSL450);
-
-    let mut b = SBuilder::new(b);
-
-    let uint3 = b.ty(SType::Vector(Box::new(SType::Uint), 3));
-    let p_i_v3 = b.type_pointer(None, spvh::StorageClass::Input, uint3);
-    let array = b.ty(SType::RuntimeArray(Box::new(SType::Uint)));
-    b.decorate(
-        array,
-        spvh::Decoration::ArrayStride,
-        [Operand::LiteralInt32(4)],
-    );
-    let data_t = b.ty(SType::Struct(vec![SType::RuntimeArray(Box::new(
-        SType::Uint,
-    ))]));
-    b.member_decorate(
-        data_t,
-        0,
-        spvh::Decoration::Offset,
-        [Operand::LiteralInt32(0)],
-    );
-    let ptr_data_t = b.type_pointer(None, spvh::StorageClass::Uniform, data_t);
-    let data = b.variable(ptr_data_t, None, spvh::StorageClass::Uniform, None);
-
-    b.buffer = data;
-    
-    b.decorate(data_t, spvh::Decoration::BufferBlock, []);
-    b.decorate(
-        data,
-        spvh::Decoration::DescriptorSet,
-        [Operand::LiteralInt32(0)],
-    );
-    b.decorate(data, spvh::Decoration::Binding, [Operand::LiteralInt32(0)]);
-
-    let id = b.variable(p_i_v3, None, spvh::StorageClass::Input, None);
-    b.idx = id;
-    b.decorate(
-        id,
-        spvh::Decoration::BuiltIn,
-        [Operand::BuiltIn(spvh::BuiltIn::GlobalInvocationId)],
-    );
-
-    // let const_64 = b.constant_u32(uint, 64);
-    // let const_1 = b.constant_u32(uint, 1);
-    // let workgroup = b.constant_composite(uint3, [const_64, const_1, const_1]);
-    // b.decorate(workgroup, spvh::Decoration::BuiltIn,b.load(uint, None, id2, None, []).unwrap(); [Operand::BuiltIn(spvh::BuiltIn::WorkgroupSize)]);
-
-    let void = b.type_void();
-    let voidf = b.type_function(void, vec![]);
-    let main = b
-        .begin_function(void, None, spvh::FunctionControl::NONE, voidf)
-        .unwrap();
-    b.begin_basic_block(None).unwrap();
-
-    // let uint = b.ty(SType::Uint);
-    // let ptr_uint_i = b.ty(SType::Ptr(Box::new(SType::Uint), spvh::StorageClass::Input));
-    // let ptr_uint_f = b.ty(SType::Ptr(
-    //     Box::new(SType::Uint),
-    //     spvh::StorageClass::Function,
-    // ));
-    // let ptr_uint_u = b.ty(SType::Ptr(
-    //     Box::new(SType::Uint),
-    //     spvh::StorageClass::Uniform,
-    // ));
-    // let const_0 = b.constant_u32(uint, 0);
-    // let id2 = b.load(uint, None, id2, None, []).unwrap();
-
-    // let slot = b
-    //     .access_chain(ptr_uint_u, None, data, [const_0, id2])
-    //     .unwrap();
-    // let slot_val = b.load(uint, None, slot, None, []).unwrap();
-    //
-    // // Process for using locals:
-    // // Declaration of a local (at function start):
-    // let v = b.variable(ptr_uint_f, None, spvh::StorageClass::Function, None);
-    // // local.set:
-    // b.store(v, slot_val, None, []).unwrap();
-    // // local.get
-    // let val = b.load(uint, None, v, None, []).unwrap();
-    //
-    // let const_12 = b.constant_u32(uint, 12);
-    // let val = b.i_mul(uint, None, val, const_12).unwrap();
-    // let const_3 = b.constant_u32(uint, 3);
-    // let val = b.i_add(uint, None, val, const_3).unwrap();
-    // b.store(v, val, None, []).unwrap();
-    // let val = b.load(uint, None, v, None, []).unwrap();
-    // b.store(slot, val, None, []).unwrap();
-
-    let mut am = AM::from_move(w);
-    am.visit(
-        main_idx,
-        Vec::new(),
-        // vec![TVal {
-        //     ty: WasmTy::I32,
-        //     val: Value {
-        //         ty: SType::Uint,
-        //         val: id2,
-        //     },
-        // }],
-        &mut b,
-    )
-    .unwrap();
-
-    b.ret().unwrap();
-    b.end_function().unwrap();
-
-    b.entry_point(spvh::ExecutionModel::GLCompute, main, "main", [id]);
-    b.execution_mode(main, spvh::ExecutionMode::LocalSize, [64, 1, 1]);
-
-    let m = b.b.module();
-    // println!("{}", m.disassemble());
     let mut spv = m.assemble();
     // TODO: test this on a big-endian system
     for i in spv.iter_mut() {

@@ -1,14 +1,5 @@
-mod am;
-pub mod spirv;
-mod vm;
 pub mod ir;
-pub mod sr;
-
-#[doc(inline)]
-pub use vm::interpret;
-
-#[doc(inline)]
-pub use am::*;
+pub mod spirv;
 
 pub mod wasm {
     pub use parity_wasm::elements::*;

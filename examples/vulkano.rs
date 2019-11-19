@@ -25,12 +25,12 @@ fn main() {
 
     // wasm_vk::ir::test(&w);
     let base = ir::to_base(&w);
-    let mut ctx = sr::Ctx::new();
+    let mut ctx = spirv::Ctx::new();
     for f in base {
         ctx.fun(f);
     }
     let m = ctx.finish(w.start_section());
-    let spv = sr::module_bytes(m);
+    let spv = spirv::module_bytes(m);
 
     // // Read SPIR-V from file instead of generating it - for debugging
     // let spv = {
@@ -54,11 +54,13 @@ fn main() {
     // Here's the data we'll be using, it's just BUFFER_SIZE consecutive u32s, starting at 0
     let data_iter = 0..BUFFER_SIZE as u32;
 
-    // We'll interpret the WASM on the CPU, and time it
-    let time = Instant::now();
-    // We just pass `interpret` the buffer, and the `wasm::Module`, and it gives us back the new buffer
-    let cpu_content = interpret(&data_iter.clone().collect::<Vec<_>>(), &w);
-    let cpu_time = Instant::now() - time;
+    // We used to have an interpreter, and we probably will again eventually
+    // Until then, we're skipping this
+    // // We'll interpret the WASM on the CPU, and time it
+    // let time = Instant::now();
+    // // We just pass `interpret` the buffer, and the `wasm::Module`, and it gives us back the new buffer
+    // let cpu_content = interpret(&data_iter.clone().collect::<Vec<_>>(), &w);
+    // let cpu_time = Instant::now() - time;
 
     // Now we'll run the SPIR-V on the GPU with Vulkano.
     // This is a bunch of boilerplate, see the Vulkano examples for explanations.
@@ -176,9 +178,9 @@ fn main() {
         gpu_time,
         &data_buffer_content[..12]
     );
-    println!(
-        "CPU interpreted in {:?}:\n\t{:?}",
-        cpu_time,
-        &cpu_content[..12]
-    );
+    // println!(
+    //     "CPU interpreted in {:?}:\n\t{:?}",
+    //     cpu_time,
+    //     &cpu_content[..12]
+    // );
 }

@@ -223,9 +223,7 @@ impl Direct {
     /// Replaces any `Br(i)`s with `with`, if `i >= offset`.
     /// If `exact` is true, only matches `Br(i)` where `i == offset`.
     fn replace_br(self, with: Self, offset: u32, exact: bool) -> Self {
-        println!("replace_br proper of {:?} for {}:{} in {:#?}", with, offset, exact, self);
-        self.map_no_lbl(|x| {
-            println!("replace_br inner of {:?} for {}:{} in {:#?}", with, offset, exact, x);match x {
+        self.map_no_lbl(|x| match x {
             Direct::Br(i) if (!exact && i >= offset) || i == offset => with.clone(),
             Direct::Label(a) => Direct::Label(Box::new(a.replace_br(with.clone(), offset + 1, exact))),
             Direct::Loop(a) => if a.br().map_or(false, |x| x > offset) {
@@ -260,7 +258,7 @@ impl Direct {
                 Direct::Loop(Box::new(a.replace_br(with.clone(), offset + 1, exact)))
             },
             x => x,
-        }})
+        })
     }
 
     /// We know this code might branch, so here's something that comes after it

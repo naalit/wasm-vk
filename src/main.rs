@@ -84,7 +84,13 @@ fn main() {
     }
 
     // First, we generate SPIR-V
-    let spv = spirv::to_spirv(w.clone());
+    let base = ir::to_base(&w);
+    let mut ctx = spirv::Ctx::new();
+    for f in base {
+        ctx.fun(f);
+    }
+    let m = ctx.finish(w.start_section());
+    let spv = spirv::module_bytes(m);
 
     if verbose {
         use rspirv::binary::Disassemble;

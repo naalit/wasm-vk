@@ -33,28 +33,44 @@ Options:
 
 ### Library usage
 wasm-vk isn't on crates.io yet, but you can try it if you want.
-You probably want to use `wasm_vk::spirv::to_spirv`, which you can pass a `parity-wasm` `Module`.
+You can use `wasm_vk::ir::to_base()`, which you can pass a `parity-wasm` `Module`, to create a vector of functions in the `Base` IR.
 We re-export `deserialize` and `deserialize_file` from `parity-wasm`, but you can also create a `parity-wasm` `Module` yourself.
+Then you can create a `wasm_vk::spirv::Ctx` and pass each function to `Ctx::fun()`.
+When you're done, pass the `Module::start_section()` of the original Wasm `Module` to `Ctx::finish()` to get a `rspirv::dr::Module`, which you can pass to `wasm_vk::spirv::module_bytes` if you need the bytes to pass to Vulkan.
 
 Note that wasm-vk doesn't interact at all with Vulkan - it just produces SPIR-V bytes for use with any Vulkan library.
 See `examples/vulkano.rs` for an example using [`Vulkano`](https://crates.io/crates/vulkano) to load and run a WebAssembly compute shader.
 
 # Current status
-See `examples/comp.wat` for everything `wasm-vk` currently supports.
+See `examples/comp.wat` for most of what `wasm-vk` currently supports.
 Supported instructions:
 ```
-- i32.mul
-- i32.add
+General operations:
+- nop
 - i32.load
 - i32.store
+- global.get (just for 'spv.id' builtin)
+- local.set
+- local.get
+Numeric operations:
 - i32.const
-- local.get (just for i32s)
-- local.set (just for i32s)
+- f32.const (but we don't support doing anything with f32s)
+- i32.add
+- i32.mul
+- i32.sub
+- i32.div_s
+- i32.div_u
 - i32.eq
+- i32.ne
 - i32.le_u
-- if/then/else/end
+- i32.le_s
+- i32.ge_u
+- i32.ge_s
+Control flow (note: we don't currently support blocks returning things):
 - loop
-- br / br_if (works for loops, sometimes works for blocks and ifs - keep your 'br' indices low for the best chance)
+- block
+- if/then/else
+- br
+- br_if
 - return (without a value)
-- global.get (just for imported globals like 'spv.id')
 ```

@@ -92,12 +92,12 @@ fn run_test(test: &'static str) -> std::io::Result<()> {
 fn run_module(w: wasm::Module) -> Vec<u32> {
     // First, we generate SPIR-V
     let base = ir::to_base(&w);
-    let mut ctx = sr::Ctx::new();
+    let mut ctx = spirv::Ctx::new();
     for f in base {
         ctx.fun(f);
     }
     let m = ctx.finish(w.start_section());
-    let spv = sr::module_bytes(m);
+    let spv = spirv::module_bytes(m);
 
     // Here's the data we'll be using, it's just BUFFER_SIZE consecutive u32s, starting at 0
     let data_iter = 0..BUFFER_SIZE as u32;
