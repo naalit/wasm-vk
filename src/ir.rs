@@ -60,6 +60,10 @@ pub enum Base {
     SetLocal(Local, Box<Base>),
     GetLocal(Local),
     GetGlobal(Global),
+    Loop(Box<Base>),
+    Break,
+    Continue,
+    Return,
     /// A left-associative block
     Seq(Box<Base>, Box<Base>),
     If {
@@ -70,21 +74,24 @@ pub enum Base {
 }
 
 impl Base {
-    fn map(self, f: impl Fn(Self) -> Self) -> Self {
+    fn map(self, f: impl Copy + Fn(Self) -> Self) -> Self {
         match self {
-            Base::INumOp(w, op, a, b) => f(Base::INumOp(w, op, Box::new(f(*a)), Box::new(f(*b)))),
-            Base::ICompOp(w, op, a, b) => f(Base::ICompOp(w, op, Box::new(f(*a)), Box::new(f(*b)))),
-            Base::Seq(a, b) => f(Base::Seq(Box::new(f(*a)), Box::new(f(*b)))),
-            Base::Store(t, a, b) => f(Base::Store(t, Box::new(f(*a)), Box::new(f(*b)))),
-            Base::SetLocal(u, x) => f(Base::SetLocal(u, Box::new(f(*x)))),
-            Base::Load(t, p) => f(Base::Load(t, Box::new(f(*p)))),
+            Base::INumOp(w, op, a, b) => f(Base::INumOp(w, op, Box::new(a.map(f)), Box::new(b.map(f)))),
+            Base::ICompOp(w, op, a, b) => f(Base::ICompOp(w, op, Box::new(a.map(f)), Box::new(b.map(f)))),
+            Base::Seq(a, b) => f(Base::Seq(Box::new(a.map(f)), Box::new(b.map(f)))),
+            Base::Store(t, a, b) => f(Base::Store(t, Box::new(a.map(f)), Box::new(b.map(f)))),
+            Base::SetLocal(u, x) => f(Base::SetLocal(u, Box::new(x.map(f)))),
+            Base::Load(t, p) => f(Base::Load(t, Box::new(p.map(f)))),
+            Base::Loop(a) => f(Base::Loop(Box::new(a.map(f)))),
+            Base::If { cond, t, f: fa } => f(Base::If { cond: Box::new(cond.map(f)), t: Box::new(t.map(f)), f: Box::new(fa.map(f)) }),
             x => f(x),
         }
     }
+
     fn fold_leaves<T>(&self, start: T, f: &impl Fn(T, &Self) -> T) -> T {
         match self {
             Base::Seq(a, b) | Base::INumOp(_, _, a, b) | Base::ICompOp(_, _, a, b) | Base::If { t: a, f: b, .. } | Base::Store(_, a, b) => b.fold_leaves(a.fold_leaves(start, f), f),
-            Base::SetLocal(_, x) | Base::Load(_, x) => x.fold_leaves(start, f),
+            Base::Loop(x) | Base::SetLocal(_, x) | Base::Load(_, x) => x.fold_leaves(start, f),
             x => f(start, x),
         }
     }
@@ -92,7 +99,7 @@ impl Base {
         let n = f(start, self);
         match self {
             Base::Seq(a, b) | Base::INumOp(_, _, a, b) | Base::ICompOp(_, _, a, b) | Base::If { t: a, f: b, .. } | Base::Store(_, a, b) => b.fold(a.fold(n, f), f),
-            Base::SetLocal(_, x) | Base::Load(_, x) => x.fold_leaves(n, f),
+            Base::Loop(x) | Base::SetLocal(_, x) | Base::Load(_, x) => x.fold(n, f),
             _ => n,
         }
     }
@@ -122,6 +129,10 @@ enum Direct {
     GetGlobal(Global),
     Seq(Box<Direct>, Box<Direct>),
     Label(Box<Direct>),
+    Loop(Box<Direct>),
+    Break,
+    Continue,
+    Return,
     Br(u32),
     // Block(Vec<Direct>),
     If {
@@ -132,29 +143,34 @@ enum Direct {
 }
 
 impl Direct {
-    fn map(self, f: impl Fn(Self) -> Self) -> Self {
+    fn map(self, f: impl Copy + Fn(Self) -> Self) -> Self {
         match self {
-            Direct::INumOp(w, op, a, b) => f(Direct::INumOp(w, op, Box::new(f(*a)), Box::new(f(*b)))),
-            Direct::ICompOp(w, op, a, b) => f(Direct::ICompOp(w, op, Box::new(f(*a)), Box::new(f(*b)))),
-            Direct::Seq(a, b) => f(Direct::Seq(Box::new(f(*a)), Box::new(f(*b)))),
-            Direct::Store(t, a, b) => f(Direct::Store(t, Box::new(f(*a)), Box::new(f(*b)))),
-            Direct::SetLocal(u, x) => f(Direct::SetLocal(u, Box::new(f(*x)))),
-            Direct::Load(t, p) => f(Direct::Load(t, Box::new(f(*p)))),
-            Direct::Label(a) => f(Direct::Label(Box::new(f(*a)))),
+            Direct::INumOp(w, op, a, b) => f(Direct::INumOp(w, op, Box::new(a.map(f)), Box::new(b.map(f)))),
+            Direct::ICompOp(w, op, a, b) => f(Direct::ICompOp(w, op, Box::new(a.map(f)), Box::new(b.map(f)))),
+            Direct::Seq(a, b) => f(Direct::Seq(Box::new(a.map(f)), Box::new(b.map(f)))),
+            Direct::Store(t, a, b) => f(Direct::Store(t, Box::new(a.map(f)), Box::new(b.map(f)))),
+            Direct::SetLocal(u, x) => f(Direct::SetLocal(u, Box::new(x.map(f)))),
+            Direct::Load(t, p) => f(Direct::Load(t, Box::new(p.map(f)))),
+            Direct::Label(a) => f(Direct::Label(Box::new(a.map(f)))),
+            Direct::Loop(a) => f(Direct::Loop(Box::new(a.map(f)))),
+            Direct::If { cond, t, f: fa } => f(Direct::If { cond: Box::new(cond.map(f)), t: Box::new(t.map(f)), f: Box::new(fa.map(f)) }),
             x => f(x),
         }
     }
-    fn map_no_lbl(self, f: impl Fn(Self) -> Self) -> Self {
+
+    fn map_no_lbl(self, f: impl Copy + Fn(Self) -> Self) -> Self {
         match self {
-            Direct::INumOp(w, op, a, b) => f(Direct::INumOp(w, op, Box::new(f(*a)), Box::new(f(*b)))),
-            Direct::ICompOp(w, op, a, b) => f(Direct::ICompOp(w, op, Box::new(f(*a)), Box::new(f(*b)))),
-            Direct::Seq(a, b) => f(Direct::Seq(Box::new(f(*a)), Box::new(f(*b)))),
-            Direct::Store(t, a, b) => f(Direct::Store(t, Box::new(f(*a)), Box::new(f(*b)))),
-            Direct::SetLocal(u, x) => f(Direct::SetLocal(u, Box::new(f(*x)))),
-            Direct::Load(t, p) => f(Direct::Load(t, Box::new(f(*p)))),
+            Direct::INumOp(w, op, a, b) => f(Direct::INumOp(w, op, Box::new(a.map_no_lbl(f)), Box::new(b.map_no_lbl(f)))),
+            Direct::ICompOp(w, op, a, b) => f(Direct::ICompOp(w, op, Box::new(a.map_no_lbl(f)), Box::new(b.map_no_lbl(f)))),
+            Direct::Seq(a, b) => f(Direct::Seq(Box::new(a.map_no_lbl(f)), Box::new(b.map_no_lbl(f)))),
+            Direct::Store(t, a, b) => f(Direct::Store(t, Box::new(a.map_no_lbl(f)), Box::new(b.map_no_lbl(f)))),
+            Direct::SetLocal(u, x) => f(Direct::SetLocal(u, Box::new(x.map_no_lbl(f)))),
+            Direct::Load(t, p) => f(Direct::Load(t, Box::new(p.map_no_lbl(f)))),
+            Direct::If { cond, t, f: fa } => f(Direct::If { cond: Box::new(cond.map_no_lbl(f)), t: Box::new(t.map_no_lbl(f)), f: Box::new(fa.map_no_lbl(f)) }),
             x => f(x),
         }
     }
+
     fn fold_leaves<T>(&self, start: T, f: &impl Fn(T, &Self) -> T) -> T {
         match self {
             Direct::Seq(a, b) | Direct::INumOp(_, _, a, b) | Direct::ICompOp(_, _, a, b) | Direct::If { t: a, f: b, .. } | Direct::Store(_, a, b) => b.fold_leaves(a.fold_leaves(start, f), f),
@@ -164,11 +180,17 @@ impl Direct {
     }
 }
 
+use std::sync::RwLock;
+lazy_static::lazy_static! {
+    static ref NLOCALS: RwLock<u32> = RwLock::new(0);
+}
+
 impl Direct {
     fn nest(self, max: u32) -> Self {
         self.map_no_lbl(|x| match x {
             Direct::Br(i) if i >= max => Direct::Br(i + 1),
             Direct::Label(a) => Direct::Label(Box::new(a.nest(max + 1))),
+            Direct::Loop(a) => Direct::Loop(Box::new(a.nest(max + 1))),
             x => x,
         })
     }
@@ -176,13 +198,14 @@ impl Direct {
         self.map_no_lbl(|x| match x {
             Direct::Br(i) if i >= max => Direct::Br(i - 1),
             Direct::Label(a) => Direct::Label(Box::new(a.lift(max + 1))),
+            Direct::Loop(a) => Direct::Loop(Box::new(a.lift(max + 1))),
             x => x,
         })
     }
 
     /// Does this code have any branches, and if so what's the maximum number
-    /// of `Seq`s they can branch out of, above this code?
-    /// In `Seq(a, b)`, if `a.br().is_some()`, then `a` might branch out of the `Seq`.
+    /// of `labels`s (or `Loop`s) they can branch out of, above this code?
+    /// In `Label(a)`, if `a.br().is_some()`, then `a` might branch out of the `Label`.
     ///
     /// For example, `<(block (br 2))>.br() == Some(1)`
     pub fn br(&self) -> Option<u32> {
@@ -191,16 +214,53 @@ impl Direct {
             (Some(a), Direct::Br(b)) => Some(a.max(*b)),
             (None, Direct::Label(a)) => a.br().and_then(|x| x.checked_sub(1)),
             (Some(q), Direct::Label(a)) => Some(a.br().and_then(|x| x.checked_sub(1)).map_or(q, |x| x.max(q))),
+            (None, Direct::Loop(a)) => a.br().and_then(|x| x.checked_sub(1)),
+            (Some(q), Direct::Loop(a)) => Some(a.br().and_then(|x| x.checked_sub(1)).map_or(q, |x| x.max(q))),
             (acc, _) => acc,
         })
     }
 
-    fn replace_br(self, with: Self, offset: u32) -> Self {
-        self.map_no_lbl(|x| match x {
-            Direct::Br(i) if i >= offset => with.clone(),
-            Direct::Label(a) => Direct::Label(Box::new(a.replace_br(with.clone(), offset + 1))),
+    /// Replaces any `Br(i)`s with `with`, if `i >= offset`.
+    /// If `exact` is true, only matches `Br(i)` where `i == offset`.
+    fn replace_br(self, with: Self, offset: u32, exact: bool) -> Self {
+        println!("replace_br proper of {:?} for {}:{} in {:#?}", with, offset, exact, self);
+        self.map_no_lbl(|x| {
+            println!("replace_br inner of {:?} for {}:{} in {:#?}", with, offset, exact, x);match x {
+            Direct::Br(i) if (!exact && i >= offset) || i == offset => with.clone(),
+            Direct::Label(a) => Direct::Label(Box::new(a.replace_br(with.clone(), offset + 1, exact))),
+            Direct::Loop(a) => if a.br().map_or(false, |x| x > offset) {
+                // Break out of this loop, then run "with"
+                // let l = false
+                // loop (a.replace_br(Seq(l = true, Op("break")), offset + 1))
+                // if l { with } else {}
+                let mut lk = NLOCALS.write().unwrap();
+                *lk += 1;
+                let l = *lk - 1;
+                drop(lk);
+               let l = Local {
+                   ty: wasm::ValueType::I32,
+                   idx: l,
+               };
+
+                Direct::Seq(
+                    Box::new(Direct::Seq(
+                        Box::new(Direct::SetLocal(l, Box::new(Direct::Const(Const::I32(0))))),
+                        Box::new(Direct::Loop(Box::new(a.replace_br(Direct::Seq(
+                            Box::new(Direct::SetLocal(l, Box::new(Direct::Const(Const::I32(1))))),
+                            Box::new(Direct::Break),
+                        ), offset + 1, exact)))),
+                    )),
+                    Box::new(Direct::If {
+                        cond: Box::new(Direct::GetLocal(l)),
+                        t: Box::new(with.clone()),
+                        f: Box::new(Direct::Nop),
+                    }),
+                )
+            } else {
+                Direct::Loop(Box::new(a.replace_br(with.clone(), offset + 1, exact)))
+            },
             x => x,
-        })
+        }})
     }
 
     /// We know this code might branch, so here's something that comes after it
@@ -214,6 +274,35 @@ impl Direct {
             _ => (),
         }
         match self {
+            Direct::Loop(a) => {
+                if a.br().map_or(true, |x| x == 0) {
+                   Direct::Seq(Box::new(Direct::Loop(a)), Box::new(x))
+                } else {
+                   let mut lk = NLOCALS.write().unwrap();
+                   *lk += 1;
+                   let l = *lk - 1;
+                   drop(lk);
+                   let l = Local {
+                       ty: wasm::ValueType::I32,
+                       idx: l,
+                   };
+
+                   Direct::Seq(
+                       Box::new(Direct::Seq(
+                           Box::new(Direct::SetLocal(l, Box::new(Direct::Const(Const::I32(1))))),
+                           Box::new(Direct::Loop(Box::new(a.replace_br(Direct::Seq(
+                               Box::new(Direct::SetLocal(l, Box::new(Direct::Const(Const::I32(0))))),
+                               Box::new(Direct::Break)
+                           ), 1, false)))),
+                       )),
+                       Box::new(Direct::If {
+                           cond: Box::new(Direct::GetLocal(l)),
+                           t: Box::new(x),
+                           f: Box::new(Direct::Nop),
+                       }),
+                   )
+                }
+            }
             Direct::Nop => x,
             Direct::Br(i) if i < offset => x,
             Direct::Br(i) if i >= offset => Direct::Br(i),
@@ -264,6 +353,11 @@ impl Direct {
             Direct::Store(t, a, b) => Base::Store(t, Box::new(a.base()), Box::new(b.base())),
             Direct::SetLocal(l, v) => Base::SetLocal(l, Box::new(v.base())),
             Direct::Load(t, p) => Base::Load(t, Box::new(p.base())),
+            Direct::Break => Base::Break,
+            Direct::Continue => Base::Continue,
+            Direct::Return => Base::Return,
+            // TODO - do we add Break at the end?
+            Direct::Loop(a) => Base::Loop(Box::new(a.replace_br(Direct::Continue, 0, true).base()))
         }
     }
 }
@@ -282,7 +376,10 @@ pub fn test(w: &wasm::Module) {
 
 pub fn to_base(w: &wasm::Module) -> Vec<Fun<Base>> {
     let d = direct(w);
-    d.into_iter().map(|Fun {params, body}| Fun { params, body: body.base() }).collect()
+    // println!("Direct: {:#?}", d);
+    let b = d.into_iter().map(|Fun {params, body}| Fun { params, body: body.base() }).collect();
+    // println!("Base: {:#?}", b);
+    b
 }
 
 fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
@@ -296,6 +393,7 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
 
         enum BlockTy {
             Block(Vec<Direct>),
+            Loop(Vec<Direct>),
             If(Box<Direct>, Vec<Direct>),
             Else(Box<Direct>, Vec<Direct>, Vec<Direct>),
         }
@@ -303,6 +401,7 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
             fn push(&mut self, op: Direct) {
                 match self {
                     BlockTy::Block(v)
+                    | BlockTy::Loop(v)
                     | BlockTy::If(_, v)
                     | BlockTy::Else(_, _, v) => {
                         v.push(op);
@@ -312,21 +411,22 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
 
             fn op(self) -> Direct {
                 fn fold(v: Vec<Direct>) -> Direct {
-                    Direct::Label(Box::new(v.into_iter().fold(Direct::Nop, |acc, x| Direct::Seq(Box::new(acc), Box::new(x)))))
+                    v.into_iter().fold(Direct::Nop, |acc, x| Direct::Seq(Box::new(acc), Box::new(x)))
                 }
 
                 match self {
                     BlockTy::If(cond, v) => Direct::If {
                         cond,
-                        t: Box::new(fold(v)),
+                        t: Box::new(Direct::Label(Box::new(fold(v)))),
                         f: Box::new(Direct::Nop),
                     },
                     BlockTy::Else(cond, t, f) => Direct::If {
                         cond,
-                        t: Box::new(fold(t)),
-                        f: Box::new(fold(f)),
+                        t: Box::new(Direct::Label(Box::new(fold(t)))),
+                        f: Box::new(Direct::Label(Box::new(fold(f)))),
                     },
-                    BlockTy::Block(v) => fold(v),
+                    BlockTy::Loop(v) => Direct::Loop(Box::new(fold(v))),
+                    BlockTy::Block(v) => Direct::Label(Box::new(fold(v))),
                 }
             }
         }
@@ -362,6 +462,14 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
             use wasm::Instruction::*;
             match op {
                 Br(i) => blocks.last_mut().unwrap().push(Direct::Br(*i)),
+                BrIf(i) => {
+                    let cond = stack.pop().unwrap();
+                    blocks.last_mut().unwrap().push(Direct::If {
+                        cond: Box::new(cond),
+                        t: Box::new(Direct::Br(*i)),
+                        f: Box::new(Direct::Nop),
+                    })
+                }
                 Nop => (),
                 SetLocal(u) => {
                     let val = stack.pop().unwrap();
@@ -393,6 +501,12 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                 I32DivU => numop!(W32, DivU),
                 I32Eq => compop!(W32, Eq),
                 I32Ne => compop!(W32, NEq),
+                I32LeU => compop!(W32, LeU),
+                I32LeS => compop!(W32, LeS),
+                I32GeU => compop!(W32, GeU),
+                I32GeS => compop!(W32, GeS),
+                Loop(_ty) => blocks.push(BlockTy::Loop(Vec::new())),
+                Block(_ty) => blocks.push(BlockTy::Block(Vec::new())),
                 If(_ty) => {
                     let cond = stack.pop().unwrap();
                     blocks.push(BlockTy::If(Box::new(cond), Vec::new()));
@@ -407,6 +521,7 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                     let b = blocks.pop().unwrap();
                     blocks.last_mut().unwrap().push(b.op());
                 },
+                Return => blocks.last_mut().unwrap().push(Direct::Return),
                 x => panic!("Instruction {} not supported", x),
             }
         }

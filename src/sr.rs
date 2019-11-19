@@ -21,6 +21,13 @@ struct Types {
 
 use std::collections::HashMap;
 
+#[derive(Debug, Copy, Clone)]
+struct Loop {
+    head: u32,
+    cont: u32,
+    end: u32,
+}
+
 #[derive(Default)]
 pub struct Ctx {
     tys: Types,
@@ -33,6 +40,7 @@ pub struct Ctx {
     locals: Vec<u32>,
     b: dr::Builder,
     funs: Vec<u32>,
+    loops: Vec<Loop>,
 }
 impl Ctx {
     pub fn new() -> Self {
@@ -53,6 +61,7 @@ impl Ctx {
             locals: Vec::new(),
             b,
             funs: Vec::new(),
+            loops: Vec::new(),
         };
 
         let t_uint = c.get(wasm::ValueType::I32);
@@ -101,8 +110,7 @@ impl Ctx {
 
     pub fn fun(&mut self, f: ir::Fun<ir::Base>) {
         let ir::Fun {params, body} = f;
-        let mut locals = body.locals();
-        locals.sort_by_key(|x| x.idx);
+        let locals = body.locals();
 
         // TODO return type
         // TODO parameters
@@ -111,13 +119,18 @@ impl Ctx {
         let fun = self.begin_function(void, None, spvh::FunctionControl::NONE, t).unwrap();
         self.begin_basic_block(None).unwrap();
 
-        let locals = locals.into_iter().map(|x| {
-            let ty = x.ty;
+        let mut max = 0;
+        let mut locals_m = HashMap::new();
+        for l in locals {
+            let ty = l.ty;
             let ty = self.ptr(ty, spvh::StorageClass::Function);
-            self.variable(ty, None, spvh::StorageClass::Function, None)
-        }).collect();
+            let n = self.variable(ty, None, spvh::StorageClass::Function, None);
+            locals_m.insert(l.idx, n);
+            max = l.idx.max(max);
+        }
 
-        self.locals = locals;
+        // TODO make this more robust
+        self.locals = (0..=max).map(|x| *locals_m.get(&x).unwrap_or(&0)).collect();
 
         // We need to initialize `self.thread_id` from `self.thread_id_v3`
         let t_uint = self.get(wasm::ValueType::I32);
@@ -326,7 +339,7 @@ impl S for ir::Base {
             ir::Base::Load(ty, ptr) => {
                 let uint = ctx.get(wasm::ValueType::I32);
                 let c0 = ctx.constant_u32(uint, 0);
-                
+
                 let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Uniform);
                 let ty = ctx.get(ty);
                 let ptr = ptr.spv(ctx);
@@ -379,6 +392,54 @@ impl S for ir::Base {
                 println!("merge block {}", l_m);
                 0
             },
+            ir::Base::Loop(a) => {
+                let head = ctx.id();
+                let cont = ctx.id();
+                let end = ctx.id();
+                let body = ctx.id();
+
+                ctx.branch(head).unwrap();
+                ctx.begin_basic_block(Some(head)).unwrap();
+                ctx.loop_merge(end, cont, spvh::LoopControl::NONE, [])
+                    .unwrap();
+                ctx.branch(body).unwrap();
+                ctx.begin_basic_block(Some(body)).unwrap();
+
+                ctx.loops.push(Loop { head, cont, end });
+
+                a.spv(ctx);
+
+                ctx.loops.pop().unwrap();
+
+                // For WASM loops, the default behaviour is to break out of a loop at the end
+                ctx.branch(end).unwrap();
+
+                // SPIR-V requires the continue block to be after the rest of the loop
+                ctx.begin_basic_block(Some(cont)).unwrap();
+                ctx.branch(head).unwrap();
+
+                ctx.begin_basic_block(Some(end)).unwrap();
+
+                0
+            }
+            ir::Base::Continue => {
+                let l = *ctx.loops.last().unwrap();
+                ctx.branch(l.cont).unwrap();
+                ctx.begin_basic_block(None).unwrap();
+                0
+            }
+            ir::Base::Break => {
+                let l = *ctx.loops.last().unwrap();
+                ctx.branch(l.end).unwrap();
+                ctx.begin_basic_block(None).unwrap();
+                0
+            }
+            ir::Base::Return => {
+                ctx.ret().unwrap();
+                // Unreacheable block
+                ctx.begin_basic_block(None).unwrap();
+                0
+            }
         }
     }
 }

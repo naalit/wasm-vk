@@ -98,7 +98,7 @@ fn run_module(w: wasm::Module) -> Vec<u32> {
     }
     let m = ctx.finish(w.start_section());
     let spv = sr::module_bytes(m);
-    
+
     // Here's the data we'll be using, it's just BUFFER_SIZE consecutive u32s, starting at 0
     let data_iter = 0..BUFFER_SIZE as u32;
 

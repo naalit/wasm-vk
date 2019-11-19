@@ -367,6 +367,7 @@ dependencies = [
 name = "wasm-vk"
 version = "0.1.0"
 dependencies = [
+ "lazy_static 1.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "parity-wasm 0.40.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "rspirv 0.5.4 (git+https://github.com/gfx-rs/rspirv?rev=219f6e2eba22c4d1834b1648dfe6b4fa6b7f9058)",
  "spirv_headers 1.4.1 (git+https://github.com/gfx-rs/rspirv?rev=219f6e2eba22c4d1834b1648dfe6b4fa6b7f9058)",

@@ -11,6 +11,7 @@ rspirv = { git="https://github.com/gfx-rs/rspirv", rev="219f6e2eba22c4d1834b1648
 spirv_headers = { git="https://github.com/gfx-rs/rspirv", rev="219f6e2eba22c4d1834b1648dfe6b4fa6b7f9058" }
 # spirv_headers = "*"
 parity-wasm = "0.40"
+lazy_static = "*"
 
 [[example]]
 name = "vulkano"
