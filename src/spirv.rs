@@ -288,13 +288,11 @@ impl S for ir::Base {
                     ir::INumOp::Mul => ctx.i_mul(ty, None, a, b).unwrap(),
                     ir::INumOp::Add => ctx.i_add(ty, None, a, b).unwrap(),
                     ir::INumOp::Sub => ctx.i_sub(ty, None, a, b).unwrap(),
+                    ir::INumOp::Shl => ctx.shift_left_logical(ty, None, a, b).unwrap(),
+                    ir::INumOp::ShrS => ctx.shift_right_arithmetic(ty, None, a, b).unwrap(),
+                    ir::INumOp::ShrU => ctx.shift_right_logical(ty, None, a, b).unwrap(),
                     ir::INumOp::DivU => ctx.u_div(ty, None, a, b).unwrap(),
-                    ir::INumOp::DivS => {
-                        let sty = ctx.signed(w);
-                        let a = ctx.bitcast(sty, None, a).unwrap();
-                        let b = ctx.bitcast(sty, None, b).unwrap();
-                        ctx.s_div(sty, None, a, b).unwrap()
-                    }
+                    ir::INumOp::DivS => ctx.s_div(ty, None, a, b).unwrap(),
                 }
             }
             ir::Base::ICompOp(w, op, a, b) => {
@@ -310,18 +308,13 @@ impl S for ir::Base {
                     ir::ICompOp::NEq => ctx.i_not_equal(t_bool, None, a, b).unwrap(),
                     ir::ICompOp::LeU => ctx.u_less_than_equal(t_bool, None, a, b).unwrap(),
                     ir::ICompOp::GeU => ctx.u_greater_than_equal(t_bool, None, a, b).unwrap(),
-                    ir::ICompOp::LeS => {
-                        let sty = ctx.signed(w);
-                        let a = ctx.bitcast(sty, None, a).unwrap();
-                        let b = ctx.bitcast(sty, None, b).unwrap();
-                        ctx.s_less_than_equal(sty, None, a, b).unwrap()
-                    }
-                    ir::ICompOp::GeS => {
-                        let sty = ctx.signed(w);
-                        let a = ctx.bitcast(sty, None, a).unwrap();
-                        let b = ctx.bitcast(sty, None, b).unwrap();
-                        ctx.s_greater_than_equal(sty, None, a, b).unwrap()
-                    }
+                    ir::ICompOp::LtU => ctx.u_less_than(t_bool, None, a, b).unwrap(),
+                    ir::ICompOp::GtU => ctx.u_greater_than(t_bool, None, a, b).unwrap(),
+
+                    ir::ICompOp::LeS => ctx.s_less_than_equal(t_bool, None, a, b).unwrap(),
+                    ir::ICompOp::GeS => ctx.s_greater_than_equal(t_bool, None, a, b).unwrap(),
+                    ir::ICompOp::LtS => ctx.s_less_than(t_bool, None, a, b).unwrap(),
+                    ir::ICompOp::GtS => ctx.s_greater_than(t_bool, None, a, b).unwrap(),
                 };
 
                 let zero = ctx.constant_u32(ty, 0);

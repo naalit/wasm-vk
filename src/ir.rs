@@ -7,6 +7,9 @@ pub enum INumOp {
     Mul,
     DivS,
     DivU,
+    Shl,
+    ShrU,
+    ShrS,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +20,10 @@ pub enum ICompOp {
     LeS,
     GeU,
     GeS,
+    LtU,
+    LtS,
+    GtU,
+    GtS,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -668,12 +675,19 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                 I32Sub => numop!(W32, Sub),
                 I32DivS => numop!(W32, DivS),
                 I32DivU => numop!(W32, DivU),
+                I32Shl => numop!(W32, Shl),
+                I32ShrS => numop!(W32, ShrS),
+                I32ShrU => numop!(W32, ShrU),
                 I32Eq => compop!(W32, Eq),
                 I32Ne => compop!(W32, NEq),
                 I32LeU => compop!(W32, LeU),
                 I32LeS => compop!(W32, LeS),
                 I32GeU => compop!(W32, GeU),
                 I32GeS => compop!(W32, GeS),
+                I32LtU => compop!(W32, LtU),
+                I32LtS => compop!(W32, LtS),
+                I32GtU => compop!(W32, GtU),
+                I32GtS => compop!(W32, GtS),
                 Loop(_ty) => blocks.push(BlockTy::Loop(Vec::new())),
                 Block(_ty) => blocks.push(BlockTy::Block(Vec::new())),
                 If(_ty) => {

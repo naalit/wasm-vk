@@ -61,12 +61,19 @@ Numeric operations:
 - i32.sub
 - i32.div_s
 - i32.div_u
+- i32.shl
+- i32.shr_s
+- i32.shr_u
 - i32.eq
 - i32.ne
 - i32.le_u
 - i32.le_s
 - i32.ge_u
 - i32.ge_s
+- i32.lt_u
+- i32.lt_s
+- i32.gt_u
+- i32.gt_s
 Control flow (note: we don't currently support blocks returning things):
 - loop
 - block
