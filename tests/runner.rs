@@ -34,6 +34,7 @@ macro_rules! test {
 
 test!(one);
 test!(fib);
+test!(rust);
 
 // --------------------
 // MORE FRAMEWORK STUFF
@@ -97,6 +98,10 @@ fn run_module(w: wasm::Module) -> Vec<u32> {
         ctx.fun(f);
     }
     let m = ctx.finish(w.start_section());
+    println!("{}", {
+        use rspirv::binary::Disassemble;
+        m.disassemble()
+    });
     let spv = spirv::module_bytes(m);
 
     // Here's the data we'll be using, it's just BUFFER_SIZE consecutive u32s, starting at 0

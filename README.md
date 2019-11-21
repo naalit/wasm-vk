@@ -52,6 +52,7 @@ General operations:
 - global.get (just for 'spv.id' builtin)
 - local.set
 - local.get
+- local.tee
 Numeric operations:
 - i32.const
 - f32.const (but we don't support doing anything with f32s)

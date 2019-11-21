@@ -79,7 +79,11 @@ impl Ctx {
             spvh::Decoration::DescriptorSet,
             [dr::Operand::LiteralInt32(0)],
         );
-        c.decorate(buffer, spvh::Decoration::Binding, [dr::Operand::LiteralInt32(0)]);
+        c.decorate(
+            buffer,
+            spvh::Decoration::Binding,
+            [dr::Operand::LiteralInt32(0)],
+        );
         c.decorate(
             t_arr,
             spvh::Decoration::ArrayStride,
@@ -104,19 +108,21 @@ impl Ctx {
         Ctx {
             buffer,
             thread_id_v3,
-            .. c
+            ..c
         }
     }
 
     pub fn fun(&mut self, f: ir::Fun<ir::Base>) {
-        let ir::Fun {params, body} = f;
+        let ir::Fun { params, body } = f;
         let locals = body.locals();
 
         // TODO return type
         // TODO parameters
         let void = self.type_void();
         let t = self.type_function(void, []);
-        let fun = self.begin_function(void, None, spvh::FunctionControl::NONE, t).unwrap();
+        let fun = self
+            .begin_function(void, None, spvh::FunctionControl::NONE, t)
+            .unwrap();
         self.begin_basic_block(None).unwrap();
 
         let mut max = 0;
@@ -137,7 +143,9 @@ impl Ctx {
         let t_uint_ptr = self.type_pointer(None, spvh::StorageClass::Input, t_uint);
         let const_0 = self.constant_u32(t_uint, 0);
         let thread_id_v3 = self.thread_id_v3;
-        let thread_id = self.access_chain(t_uint_ptr, None, thread_id_v3, [const_0]).unwrap();
+        let thread_id = self
+            .access_chain(t_uint_ptr, None, thread_id_v3, [const_0])
+            .unwrap();
         let thread_id = self.load(t_uint, None, thread_id, None, []).unwrap();
         self.thread_id = thread_id;
 
@@ -173,19 +181,23 @@ impl Ctx {
 
     fn signed(&mut self, width: ir::Width) -> u32 {
         match width {
-            ir::Width::W32 => if let Some(i) = self.tys.s_32 {
-                i
-            } else {
-                let i = self.type_int(32, 1);
-                self.tys.s_32 = Some(i);
-                i
+            ir::Width::W32 => {
+                if let Some(i) = self.tys.s_32 {
+                    i
+                } else {
+                    let i = self.type_int(32, 1);
+                    self.tys.s_32 = Some(i);
+                    i
+                }
             }
-            ir::Width::W64 => if let Some(i) = self.tys.s_64 {
-                i
-            } else {
-                let i = self.type_int(64, 1);
-                self.tys.s_64 = Some(i);
-                i
+            ir::Width::W64 => {
+                if let Some(i) = self.tys.s_64 {
+                    i
+                } else {
+                    let i = self.type_int(64, 1);
+                    self.tys.s_64 = Some(i);
+                    i
+                }
             }
         }
     }
@@ -210,33 +222,41 @@ impl Ctx {
 
     fn get(&mut self, t: wasm::ValueType) -> u32 {
         match t {
-            wasm::ValueType::I32 => if let Some(i) = self.tys.i_32 {
-                i
-            } else {
-                let i = self.type_int(32, 0);
-                self.tys.i_32 = Some(i);
-                i
+            wasm::ValueType::I32 => {
+                if let Some(i) = self.tys.i_32 {
+                    i
+                } else {
+                    let i = self.type_int(32, 0);
+                    self.tys.i_32 = Some(i);
+                    i
+                }
             }
-            wasm::ValueType::I64 => if let Some(i) = self.tys.i_64 {
-                i
-            } else {
-                let i = self.type_int(64, 0);
-                self.tys.i_64 = Some(i);
-                i
+            wasm::ValueType::I64 => {
+                if let Some(i) = self.tys.i_64 {
+                    i
+                } else {
+                    let i = self.type_int(64, 0);
+                    self.tys.i_64 = Some(i);
+                    i
+                }
             }
-            wasm::ValueType::F32 => if let Some(i) = self.tys.f_32 {
-                i
-            } else {
-                let i = self.type_float(32);
-                self.tys.f_32 = Some(i);
-                i
+            wasm::ValueType::F32 => {
+                if let Some(i) = self.tys.f_32 {
+                    i
+                } else {
+                    let i = self.type_float(32);
+                    self.tys.f_32 = Some(i);
+                    i
+                }
             }
-            wasm::ValueType::F64 => if let Some(i) = self.tys.f_64 {
-                i
-            } else {
-                let i = self.type_float(64);
-                self.tys.f_64 = Some(i);
-                i
+            wasm::ValueType::F64 => {
+                if let Some(i) = self.tys.f_64 {
+                    i
+                } else {
+                    let i = self.type_float(64);
+                    self.tys.f_64 = Some(i);
+                    i
+                }
             }
         }
     }
@@ -333,7 +353,13 @@ impl S for ir::Base {
                 0
             }
             ir::Base::GetGlobal(g) => {
-                assert_eq!(g, ir::Global { ty: wasm::GlobalType::new(wasm::ValueType::I32, false), idx: 0 });
+                assert_eq!(
+                    g,
+                    ir::Global {
+                        ty: wasm::GlobalType::new(wasm::ValueType::I32, false),
+                        idx: 0
+                    }
+                );
                 ctx.thread_id
             }
             ir::Base::Load(ty, ptr) => {
@@ -355,10 +381,11 @@ impl S for ir::Base {
                 let uint = ctx.get(wasm::ValueType::I32);
                 let c0 = ctx.constant_u32(uint, 0);
 
+                // The pointer is lower in the stack for the WASM store instruction, so it gets evaluated first.
+                let ptr = ptr.spv(ctx);
                 let val = val.spv(ctx);
 
                 let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Uniform);
-                let ptr = ptr.spv(ctx);
                 // Divide by four because of the size of a u32
                 let c4 = ctx.constant_u32(uint, 4);
                 let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
@@ -380,7 +407,8 @@ impl S for ir::Base {
                 let t_bool = ctx.bool();
                 let cond = ctx.i_not_equal(t_bool, None, cond, c0).unwrap();
 
-                ctx.selection_merge(l_m, spvh::SelectionControl::NONE).unwrap();
+                ctx.selection_merge(l_m, spvh::SelectionControl::NONE)
+                    .unwrap();
                 ctx.branch_conditional(cond, l_t, l_f, []).unwrap();
                 ctx.begin_basic_block(Some(l_t)).unwrap();
                 t.spv(ctx);
@@ -389,9 +417,9 @@ impl S for ir::Base {
                 f.spv(ctx);
                 ctx.branch(l_m).unwrap();
                 ctx.begin_basic_block(Some(l_m)).unwrap();
-                
+
                 0
-            },
+            }
             ir::Base::Loop(a) => {
                 let head = ctx.id();
                 let cont = ctx.id();
