@@ -35,6 +35,7 @@ macro_rules! test {
 test!(one);
 test!(fib);
 test!(rust);
+test!(call);
 
 // --------------------
 // MORE FRAMEWORK STUFF

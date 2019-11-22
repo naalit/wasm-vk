@@ -71,6 +71,7 @@ pub enum Base {
     Break,
     Continue,
     Return,
+    Call(u32, Vec<Base>),
     /// A left-associative block
     Seq(Box<Base>, Box<Base>),
     If {
@@ -99,6 +100,10 @@ impl Base {
                 t: Box::new(t.map(f)),
                 f: Box::new(fa.map(f)),
             }),
+            Base::Call(i, params) => f(Base::Call(
+                i,
+                params.into_iter().map(|x| x.map(f)).collect(),
+            )),
             x => f(x),
         }
     }
@@ -111,6 +116,7 @@ impl Base {
             | Base::If { t: a, f: b, .. }
             | Base::Store(_, a, b) => b.fold_leaves(a.fold_leaves(start, f), f),
             Base::Loop(x) | Base::SetLocal(_, x) | Base::Load(_, x) => x.fold_leaves(start, f),
+            Base::Call(_, params) => params.iter().fold(start, |acc, x| x.fold_leaves(acc, f)),
             x => f(start, x),
         }
     }
@@ -123,6 +129,7 @@ impl Base {
             | Base::If { t: a, f: b, .. }
             | Base::Store(_, a, b) => b.fold(a.fold(n, f), f),
             Base::Loop(x) | Base::SetLocal(_, x) | Base::Load(_, x) => x.fold(n, f),
+            Base::Call(_, params) => params.iter().fold(n, |acc, x| x.fold_leaves(acc, f)),
             _ => n,
         }
     }
@@ -156,6 +163,7 @@ enum Direct {
     Break,
     Continue,
     Return,
+    Call(u32, Vec<Direct>),
     Br(u32),
     // Block(Vec<Direct>),
     If {
@@ -191,6 +199,10 @@ impl Direct {
                 t: Box::new(t.map(f)),
                 f: Box::new(fa.map(f)),
             }),
+            Direct::Call(i, params) => f(Direct::Call(
+                i,
+                params.into_iter().map(|x| x.map(f)).collect(),
+            )),
             x => f(x),
         }
     }
@@ -225,6 +237,10 @@ impl Direct {
                 t: Box::new(t.map_no_lbl(f)),
                 f: Box::new(fa.map_no_lbl(f)),
             }),
+            Direct::Call(i, params) => f(Direct::Call(
+                i,
+                params.into_iter().map(|x| x.map(f)).collect(),
+            )),
             x => f(x),
         }
     }
@@ -237,6 +253,7 @@ impl Direct {
             | Direct::If { t: a, f: b, .. }
             | Direct::Store(_, a, b) => b.fold_leaves(a.fold_leaves(start, f), f),
             Direct::SetLocal(_, x) | Direct::Load(_, x) => x.fold_leaves(start, f),
+            Direct::Call(_, params) => params.iter().fold(start, |acc, x| x.fold_leaves(acc, f)),
             x => f(start, x),
         }
     }
@@ -458,6 +475,9 @@ impl Direct {
             Direct::Break => Base::Break,
             Direct::Continue => Base::Continue,
             Direct::Return => Base::Return,
+            Direct::Call(i, params) => {
+                Base::Call(i, params.into_iter().map(|x| x.base()).collect())
+            }
             // TODO - do we add Break at the end?
             Direct::Loop(a) => Base::Loop(Box::new(a.replace_br(Direct::Continue, 0, true).base())),
         }
@@ -468,6 +488,9 @@ impl Direct {
 pub struct Fun<T> {
     pub params: Vec<wasm::ValueType>,
     pub body: T,
+    /// Return value
+    /// Return type
+    pub ty: Option<wasm::ValueType>,
 }
 
 pub fn test(w: &wasm::Module) {
@@ -476,9 +499,10 @@ pub fn test(w: &wasm::Module) {
     println!(
         "Base: {:#?}",
         d.into_iter()
-            .map(|Fun { params, body }| Fun {
+            .map(|Fun { params, body, ty }| Fun {
                 params,
-                body: body.base()
+                body: body.base(),
+                ty,
             })
             .collect::<Vec<_>>()
     );
@@ -487,15 +511,21 @@ pub fn test(w: &wasm::Module) {
 pub fn to_base(w: &wasm::Module) -> Vec<Fun<Base>> {
     let d = direct(w);
     // println!("Direct: {:#?}", d);
-    let b = d
-        .into_iter()
-        .map(|Fun { params, body }| Fun {
+    // let b = d
+    //     .into_iter()
+    //     .map(|Fun { params, body }| Fun {
+    //         params,
+    //         body: body.base(),
+    //     })
+    //     .collect();
+    // println!("Base: {:#?}", b);
+    d.into_iter()
+        .map(|Fun { params, body, ty }| Fun {
             params,
             body: body.base(),
+            ty,
         })
-        .collect();
-    // println!("Base: {:#?}", b);
-    b
+        .collect()
 }
 
 fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
@@ -578,14 +608,16 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
         let ty = fun.type_ref();
         let wasm::Type::Function(ty) = &w.type_section().unwrap().types()[ty as usize];
         let params = ty.params().to_vec();
+        let ret = ty.return_type();
 
         let code = body.code();
 
         let locals: Vec<_> = body
             .locals()
             .iter()
-            .flat_map(|x| (0..x.count()).map(move |_| x))
+            .flat_map(|x| (0..x.count()).map(move |_| x.value_type()))
             .collect();
+        let locals: Vec<_> = params.iter().cloned().chain(locals).collect();
 
         macro_rules! numop {
             ($w:ident, $op:ident) => {{
@@ -617,6 +649,22 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
         for op in code.elements() {
             use wasm::Instruction::*;
             match op {
+                Call(i) => {
+                    let f = &w.function_section().unwrap().entries()[*i as usize];
+                    let wasm::Type::Function(f) =
+                        &w.type_section().unwrap().types()[f.type_ref() as usize];
+                    let mut params: Vec<_> =
+                        f.params().iter().map(|_x| stack.pop().unwrap()).collect();
+                    // The arguments are stored on the stack in reverse order
+                    params.reverse();
+
+                    // It only goes on the stack if it returned something
+                    if f.return_type().is_some() {
+                        stack.push(Direct::Call(*i, params))
+                    } else {
+                        blocks.last_mut().unwrap().push(Direct::Call(*i, params))
+                    }
+                }
                 Br(i) => blocks.last_mut().unwrap().push(Direct::Br(*i)),
                 BrIf(i) => {
                     let cond = stack.pop().unwrap();
@@ -629,7 +677,7 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                 Nop => (),
                 SetLocal(u) => {
                     let val = stack.pop().unwrap();
-                    let ty = locals[*u as usize].value_type();
+                    let ty = locals[*u as usize];
                     blocks
                         .last_mut()
                         .unwrap()
@@ -653,12 +701,12 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                     idx: *idx,
                 })),
                 GetLocal(u) => {
-                    let ty = locals[*u as usize].value_type();
+                    let ty = locals[*u as usize];
                     stack.push(Direct::GetLocal(Local { ty, idx: *u }))
                 }
                 TeeLocal(u) => {
                     let val = stack.pop().unwrap().clone();
-                    let ty = locals[*u as usize].value_type();
+                    let ty = locals[*u as usize];
                     // This has a side effect but also returns something, and we need the side effect to get executed at the right time
                     // So we use a Seq instead of pushing the Set to blocks.last_mut()
                     stack.push(Direct::Seq(
@@ -712,11 +760,25 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
         }
 
         assert_eq!(blocks.len(), 1);
-        assert_eq!(stack.len(), 0, "Stuff left on stack");
+
+        let mut body = blocks.pop().unwrap().op();
+
+        if ret.is_none() {
+            assert_eq!(stack.len(), 0, "Stuff left on stack: {:?}", stack);
+        } else {
+            assert_eq!(
+                stack.len(),
+                1,
+                "Wrong number of things on stack: {:?}",
+                stack
+            );
+            body = Direct::Seq(Box::new(body), Box::new(stack.pop().unwrap()));
+        }
 
         funs.push(Fun {
             params,
-            body: blocks.pop().unwrap().op(),
+            body,
+            ty: ret,
         });
     }
     funs

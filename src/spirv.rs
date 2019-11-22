@@ -2,7 +2,7 @@ use crate::*;
 use rspirv::dr;
 use spirv_headers as spvh;
 
-trait S {
+trait ToSpirv {
     type Value;
     type Ctx;
     fn spv(self, ctx: &mut Self::Ctx) -> Self::Value;
@@ -12,9 +12,7 @@ trait S {
 struct Types {
     b: Option<u32>,
     i_32: Option<u32>,
-    s_32: Option<u32>,
     i_64: Option<u32>,
-    s_64: Option<u32>,
     f_32: Option<u32>,
     f_64: Option<u32>,
 }
@@ -37,9 +35,10 @@ pub struct Ctx {
     thread_id: u32,
     /// The thread id uvec3 - global
     thread_id_v3: u32,
-    locals: Vec<u32>,
+    locals: IndexMap<u32>,
     b: dr::Builder,
-    funs: Vec<u32>,
+    /// (Function, type)
+    funs: Vec<(u32, u32)>,
     loops: Vec<Loop>,
 }
 impl Ctx {
@@ -58,7 +57,7 @@ impl Ctx {
             buffer: 0,
             thread_id: 0,
             thread_id_v3: 0,
-            locals: Vec::new(),
+            locals: IndexMap::default(),
             b,
             funs: Vec::new(),
             loops: Vec::new(),
@@ -113,20 +112,23 @@ impl Ctx {
     }
 
     pub fn fun(&mut self, f: ir::Fun<ir::Base>) {
-        let ir::Fun { params, body } = f;
+        let ir::Fun { params, body, ty } = f;
         let locals = body.locals();
 
-        // TODO return type
-        // TODO parameters
-        let void = self.type_void();
-        let t = self.type_function(void, []);
+        let ret = if let Some(ty) = ty {
+            self.get(ty)
+        } else {
+            self.type_void()
+        };
+        let param_tys: Vec<_> = params.iter().map(|x| self.get(*x)).collect();
+        let t = self.type_function(ret, param_tys);
         let fun = self
-            .begin_function(void, None, spvh::FunctionControl::NONE, t)
+            .begin_function(ret, None, spvh::FunctionControl::NONE, t)
             .unwrap();
         self.begin_basic_block(None).unwrap();
 
         let mut max = 0;
-        let mut locals_m = HashMap::new();
+        let mut locals_m = IndexMap::with_capacity(locals.len());
         for l in locals {
             let ty = l.ty;
             let ty = self.ptr(ty, spvh::StorageClass::Function);
@@ -135,8 +137,17 @@ impl Ctx {
             max = l.idx.max(max);
         }
 
-        // TODO make this more robust
-        self.locals = (0..=max).map(|x| *locals_m.get(&x).unwrap_or(&0)).collect();
+        // Parameters are separate from locals in SPIR-V, so we store them into the corresponding locals
+        for (idx, ty) in params.into_iter().enumerate() {
+            let ty = self.get(ty);
+            let n = self.function_parameter(ty).unwrap();
+            // If it's not in locals_m, it's not used - no need to store it anywhere
+            if let Some(l) = locals_m.get(idx as u32) {
+                self.store(*l, n, None, []).unwrap();
+            }
+        }
+
+        self.locals = locals_m;
 
         // We need to initialize `self.thread_id` from `self.thread_id_v3`
         let t_uint = self.get(wasm::ValueType::I32);
@@ -150,17 +161,20 @@ impl Ctx {
         self.thread_id = thread_id;
 
         // Now compile the body
-        body.spv(self);
-
-        self.ret().unwrap();
+        let r = body.spv(self);
+        if ty.is_some() {
+            self.ret_value(r).unwrap();
+        } else {
+            self.ret().unwrap();
+        }
         self.end_function().unwrap();
 
-        self.funs.push(fun);
+        self.funs.push((fun, ret));
     }
 
     pub fn finish(mut self, entry: Option<u32>) -> dr::Module {
         if let Some(entry) = entry {
-            let entry = self.funs[entry as usize];
+            let (entry, _) = self.funs[entry as usize];
 
             let id = self.thread_id_v3;
             self.entry_point(spvh::ExecutionModel::GLCompute, entry, "main", [id]);
@@ -176,29 +190,6 @@ impl Ctx {
             let i = self.type_bool();
             self.tys.b = Some(i);
             i
-        }
-    }
-
-    fn signed(&mut self, width: ir::Width) -> u32 {
-        match width {
-            ir::Width::W32 => {
-                if let Some(i) = self.tys.s_32 {
-                    i
-                } else {
-                    let i = self.type_int(32, 1);
-                    self.tys.s_32 = Some(i);
-                    i
-                }
-            }
-            ir::Width::W64 => {
-                if let Some(i) = self.tys.s_64 {
-                    i
-                } else {
-                    let i = self.type_int(64, 1);
-                    self.tys.s_64 = Some(i);
-                    i
-                }
-            }
         }
     }
 
@@ -274,11 +265,16 @@ impl DerefMut for Ctx {
     }
 }
 
-impl S for ir::Base {
+impl ToSpirv for ir::Base {
     type Ctx = Ctx;
     type Value = u32;
     fn spv(self, ctx: &mut Ctx) -> u32 {
         match self {
+            ir::Base::Call(i, params) => {
+                let (f, t) = ctx.funs[i as usize];
+                let params: Vec<_> = params.into_iter().map(|x| x.spv(ctx)).collect();
+                ctx.function_call(t, None, f, params).unwrap()
+            }
             ir::Base::Nop => 0,
             ir::Base::INumOp(w, op, a, b) => {
                 let a = a.spv(ctx);
@@ -336,11 +332,11 @@ impl S for ir::Base {
             }
             ir::Base::GetLocal(l) => {
                 let ty = ctx.get(l.ty);
-                let l = ctx.locals[l.idx as usize];
+                let l = *ctx.locals.get(l.idx).unwrap();
                 ctx.load(ty, None, l, None, []).unwrap()
             }
             ir::Base::SetLocal(l, val) => {
-                let l = ctx.locals[l.idx as usize];
+                let l = *ctx.locals.get(l.idx).unwrap();
                 let val = val.spv(ctx);
                 ctx.store(l, val, None, []).unwrap();
                 0

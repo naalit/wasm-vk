@@ -81,4 +81,5 @@ Control flow (note: we don't currently support blocks returning things):
 - br
 - br_if
 - return (without a value)
+- call (we support functions in general)
 ```

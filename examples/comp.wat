@@ -8,14 +8,12 @@
      that the user has allocated with whatever size they want ;)
   (memory $mem 1)
 
-  ;; (func $slot (result i32)
-  ;;   (return
-  ;;     (i32.mul
-  ;;       (i32.const 4)
-  ;;       (global.get $id)
-  ;;     )
-  ;;   )
-  ;; )
+  (func $slot (result i32)
+      (i32.mul
+        (i32.const 4)
+        (global.get $id)
+      )
+  )
 
   (; 'main' is a start function, so it doesn't have any parameters or return anything ;)
   (func $main
@@ -24,11 +22,7 @@
     (; $id is an invocation index - we need a byte index, so we multiply by 4
        (since we're storing a 4-byte number) ;)
     (local.set $ptr
-      ;; (call $slot)
-      (i32.mul
-        (i32.const 4)
-        (global.get $id)
-      )
+      (call $slot)
       )
     (local.set $val
       (i32.load (local.get $ptr)))
