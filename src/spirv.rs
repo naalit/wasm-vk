@@ -40,6 +40,7 @@ pub struct Ctx {
     /// (Function, type)
     funs: Vec<(u32, u32)>,
     loops: Vec<Loop>,
+    ext: u32,
 }
 impl Ctx {
     pub fn new() -> Self {
@@ -47,7 +48,7 @@ impl Ctx {
 
         b.set_version(1, 0);
         b.capability(spvh::Capability::Shader);
-        b.ext_inst_import("GLSL.std.450");
+        let ext = b.ext_inst_import("GLSL.std.450");
         b.memory_model(spvh::AddressingModel::Logical, spvh::MemoryModel::GLSL450);
 
         // A temporary context mostly so we can use the type cache
@@ -61,6 +62,7 @@ impl Ctx {
             b,
             funs: Vec::new(),
             loops: Vec::new(),
+            ext,
         };
 
         let t_uint = c.get(wasm::ValueType::I32);
@@ -200,6 +202,13 @@ impl Ctx {
         }
     }
 
+    fn float(&mut self, width: ir::Width) -> u32 {
+        match width {
+            ir::Width::W32 => self.get(wasm::ValueType::F32),
+            ir::Width::W64 => self.get(wasm::ValueType::F64),
+        }
+    }
+
     fn ptr(&mut self, t: wasm::ValueType, class: spvh::StorageClass) -> u32 {
         if let Some(i) = self.ptrs.get(&(t, class)) {
             *i
@@ -289,6 +298,68 @@ impl ToSpirv for ir::Base {
                     ir::INumOp::ShrU => ctx.shift_right_logical(ty, None, a, b).unwrap(),
                     ir::INumOp::DivU => ctx.u_div(ty, None, a, b).unwrap(),
                     ir::INumOp::DivS => ctx.s_div(ty, None, a, b).unwrap(),
+                    ir::INumOp::And => ctx.bitwise_and(ty, None, a, b).unwrap(),
+                    ir::INumOp::Or => ctx.bitwise_or(ty, None, a, b).unwrap(),
+                    ir::INumOp::Xor => ctx.bitwise_xor(ty, None, a, b).unwrap(),
+                }
+            }
+            ir::Base::FNumOp(w, op, a, b) => {
+                let a = a.spv(ctx);
+                let b = b.spv(ctx);
+                let ty = ctx.float(w);
+                let ext = ctx.ext;
+                match op {
+                    ir::FNumOp::Add => ctx.f_add(ty, None, a, b).unwrap(),
+                    ir::FNumOp::Sub => ctx.f_sub(ty, None, a, b).unwrap(),
+                    ir::FNumOp::Mul => ctx.f_mul(ty, None, a, b).unwrap(),
+                    ir::FNumOp::Div => ctx.f_div(ty, None, a, b).unwrap(),
+                    ir::FNumOp::Max => ctx
+                        .ext_inst(ty, None, ext, spvh::GLOp::FMax as u32, [a, b])
+                        .unwrap(),
+                    ir::FNumOp::Min => ctx
+                        .ext_inst(ty, None, ext, spvh::GLOp::FMin as u32, [a, b])
+                        .unwrap(),
+                }
+            }
+            ir::Base::FUnOp(w, op, a) => {
+                let a = a.spv(ctx);
+                let ty = ctx.float(w);
+                let ext = ctx.ext;
+                match op {
+                    ir::FUnOp::Sqrt => ctx
+                        .ext_inst(ty, None, ext, spvh::GLOp::Sqrt as u32, [a])
+                        .unwrap(),
+                    ir::FUnOp::Abs => ctx
+                        .ext_inst(ty, None, ext, spvh::GLOp::FAbs as u32, [a])
+                        .unwrap(),
+                    ir::FUnOp::Ceil => ctx
+                        .ext_inst(ty, None, ext, spvh::GLOp::Ceil as u32, [a])
+                        .unwrap(),
+                    ir::FUnOp::Floor => ctx
+                        .ext_inst(ty, None, ext, spvh::GLOp::Floor as u32, [a])
+                        .unwrap(),
+                    ir::FUnOp::Neg => ctx.f_negate(ty, None, a).unwrap(),
+                }
+            }
+            ir::Base::CvtOp(op, a) => {
+                let a = a.spv(ctx);
+                match op {
+                    ir::CvtOp::F32toI32S => {
+                        let ty = ctx.get(wasm::ValueType::I32);
+                        ctx.convert_f_to_s(ty, None, a).unwrap()
+                    }
+                    ir::CvtOp::I32toF32S => {
+                        let ty = ctx.get(wasm::ValueType::F32);
+                        ctx.convert_s_to_f(ty, None, a).unwrap()
+                    }
+                    ir::CvtOp::F32toI32U => {
+                        let ty = ctx.get(wasm::ValueType::I32);
+                        ctx.convert_f_to_u(ty, None, a).unwrap()
+                    }
+                    ir::CvtOp::I32toF32U => {
+                        let ty = ctx.get(wasm::ValueType::F32);
+                        ctx.convert_u_to_f(ty, None, a).unwrap()
+                    }
                 }
             }
             ir::Base::ICompOp(w, op, a, b) => {
@@ -311,6 +382,27 @@ impl ToSpirv for ir::Base {
                     ir::ICompOp::GeS => ctx.s_greater_than_equal(t_bool, None, a, b).unwrap(),
                     ir::ICompOp::LtS => ctx.s_less_than(t_bool, None, a, b).unwrap(),
                     ir::ICompOp::GtS => ctx.s_greater_than(t_bool, None, a, b).unwrap(),
+                };
+
+                let zero = ctx.constant_u32(ty, 0);
+                let one = ctx.constant_u32(ty, 1);
+                ctx.select(ty, None, b, one, zero).unwrap()
+            }
+            ir::Base::FCompOp(_w, op, a, b) => {
+                let a = a.spv(ctx);
+                let b = b.spv(ctx);
+                // Unlike WASM, SPIR-V has booleans
+                // So we convert them to integers immediately
+                let ty = ctx.get(wasm::ValueType::I32);
+                let t_bool = ctx.bool();
+
+                let b = match op {
+                    ir::FCompOp::Eq => ctx.f_ord_equal(t_bool, None, a, b).unwrap(),
+                    ir::FCompOp::NEq => ctx.f_ord_not_equal(t_bool, None, a, b).unwrap(),
+                    ir::FCompOp::Le => ctx.f_ord_less_than_equal(t_bool, None, a, b).unwrap(),
+                    ir::FCompOp::Ge => ctx.f_ord_greater_than_equal(t_bool, None, a, b).unwrap(),
+                    ir::FCompOp::Lt => ctx.f_ord_less_than(t_bool, None, a, b).unwrap(),
+                    ir::FCompOp::Gt => ctx.f_ord_greater_than(t_bool, None, a, b).unwrap(),
                 };
 
                 let zero = ctx.constant_u32(ty, 0);

@@ -10,6 +10,9 @@ pub enum INumOp {
     Shl,
     ShrU,
     ShrS,
+    And,
+    Or,
+    Xor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +27,43 @@ pub enum ICompOp {
     LtS,
     GtU,
     GtS,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CvtOp {
+    F32toI32S,
+    F32toI32U,
+    I32toF32S,
+    I32toF32U,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FUnOp {
+    Sqrt,
+    Abs,
+    Neg,
+    Ceil,
+    Floor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FNumOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Min,
+    Max,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FCompOp {
+    Eq,
+    NEq,
+    Le,
+    Ge,
+    Lt,
+    Gt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +104,10 @@ pub enum Base {
     Store(wasm::ValueType, Box<Base>, Box<Base>),
     INumOp(Width, INumOp, Box<Base>, Box<Base>),
     ICompOp(Width, ICompOp, Box<Base>, Box<Base>),
+    FCompOp(Width, FCompOp, Box<Base>, Box<Base>),
+    FNumOp(Width, FNumOp, Box<Base>, Box<Base>),
+    CvtOp(CvtOp, Box<Base>),
+    FUnOp(Width, FUnOp, Box<Base>),
     SetLocal(Local, Box<Base>),
     GetLocal(Local),
     GetGlobal(Global),
@@ -90,6 +134,14 @@ impl Base {
             Base::ICompOp(w, op, a, b) => {
                 f(Base::ICompOp(w, op, Box::new(a.map(f)), Box::new(b.map(f))))
             }
+            Base::FCompOp(w, op, a, b) => {
+                f(Base::FCompOp(w, op, Box::new(a.map(f)), Box::new(b.map(f))))
+            }
+            Base::FNumOp(w, op, a, b) => {
+                f(Base::FNumOp(w, op, Box::new(a.map(f)), Box::new(b.map(f))))
+            }
+            Base::FUnOp(w, op, a) => f(Base::FUnOp(w, op, Box::new(a.map(f)))),
+            Base::CvtOp(op, a) => f(Base::CvtOp(op, Box::new(a.map(f)))),
             Base::Seq(a, b) => f(Base::Seq(Box::new(a.map(f)), Box::new(b.map(f)))),
             Base::Store(t, a, b) => f(Base::Store(t, Box::new(a.map(f)), Box::new(b.map(f)))),
             Base::SetLocal(u, x) => f(Base::SetLocal(u, Box::new(x.map(f)))),
@@ -113,9 +165,15 @@ impl Base {
             Base::Seq(a, b)
             | Base::INumOp(_, _, a, b)
             | Base::ICompOp(_, _, a, b)
+            | Base::FCompOp(_, _, a, b)
+            | Base::FNumOp(_, _, a, b)
             | Base::If { t: a, f: b, .. }
             | Base::Store(_, a, b) => b.fold_leaves(a.fold_leaves(start, f), f),
-            Base::Loop(x) | Base::SetLocal(_, x) | Base::Load(_, x) => x.fold_leaves(start, f),
+            Base::Loop(x)
+            | Base::SetLocal(_, x)
+            | Base::Load(_, x)
+            | Base::CvtOp(_, x)
+            | Base::FUnOp(_, _, x) => x.fold_leaves(start, f),
             Base::Call(_, params) => params.iter().fold(start, |acc, x| x.fold_leaves(acc, f)),
             x => f(start, x),
         }
@@ -125,10 +183,16 @@ impl Base {
         match self {
             Base::Seq(a, b)
             | Base::INumOp(_, _, a, b)
+            | Base::FNumOp(_, _, a, b)
             | Base::ICompOp(_, _, a, b)
+            | Base::FCompOp(_, _, a, b)
             | Base::If { t: a, f: b, .. }
             | Base::Store(_, a, b) => b.fold(a.fold(n, f), f),
-            Base::Loop(x) | Base::SetLocal(_, x) | Base::Load(_, x) => x.fold(n, f),
+            Base::Loop(x)
+            | Base::SetLocal(_, x)
+            | Base::Load(_, x)
+            | Base::CvtOp(_, x)
+            | Base::FUnOp(_, _, x) => x.fold(n, f),
             Base::Call(_, params) => params.iter().fold(n, |acc, x| x.fold_leaves(acc, f)),
             _ => n,
         }
@@ -154,6 +218,10 @@ enum Direct {
     Store(wasm::ValueType, Box<Direct>, Box<Direct>),
     INumOp(Width, INumOp, Box<Direct>, Box<Direct>),
     ICompOp(Width, ICompOp, Box<Direct>, Box<Direct>),
+    FCompOp(Width, FCompOp, Box<Direct>, Box<Direct>),
+    FNumOp(Width, FNumOp, Box<Direct>, Box<Direct>),
+    CvtOp(CvtOp, Box<Direct>),
+    FUnOp(Width, FUnOp, Box<Direct>),
     SetLocal(Local, Box<Direct>),
     GetLocal(Local),
     GetGlobal(Global),
@@ -188,6 +256,20 @@ impl Direct {
                 Box::new(a.map(f)),
                 Box::new(b.map(f)),
             )),
+            Direct::FCompOp(w, op, a, b) => f(Direct::FCompOp(
+                w,
+                op,
+                Box::new(a.map(f)),
+                Box::new(b.map(f)),
+            )),
+            Direct::FNumOp(w, op, a, b) => f(Direct::FNumOp(
+                w,
+                op,
+                Box::new(a.map(f)),
+                Box::new(b.map(f)),
+            )),
+            Direct::FUnOp(w, op, a) => f(Direct::FUnOp(w, op, Box::new(a.map(f)))),
+            Direct::CvtOp(op, a) => f(Direct::CvtOp(op, Box::new(a.map(f)))),
             Direct::Seq(a, b) => f(Direct::Seq(Box::new(a.map(f)), Box::new(b.map(f)))),
             Direct::Store(t, a, b) => f(Direct::Store(t, Box::new(a.map(f)), Box::new(b.map(f)))),
             Direct::SetLocal(u, x) => f(Direct::SetLocal(u, Box::new(x.map(f)))),
@@ -221,6 +303,20 @@ impl Direct {
                 Box::new(a.map_no_lbl(f)),
                 Box::new(b.map_no_lbl(f)),
             )),
+            Direct::FCompOp(w, op, a, b) => f(Direct::FCompOp(
+                w,
+                op,
+                Box::new(a.map_no_lbl(f)),
+                Box::new(b.map_no_lbl(f)),
+            )),
+            Direct::FNumOp(w, op, a, b) => f(Direct::FNumOp(
+                w,
+                op,
+                Box::new(a.map_no_lbl(f)),
+                Box::new(b.map_no_lbl(f)),
+            )),
+            Direct::FUnOp(w, op, a) => f(Direct::FUnOp(w, op, Box::new(a.map_no_lbl(f)))),
+            Direct::CvtOp(op, a) => f(Direct::CvtOp(op, Box::new(a.map_no_lbl(f)))),
             Direct::Seq(a, b) => f(Direct::Seq(
                 Box::new(a.map_no_lbl(f)),
                 Box::new(b.map_no_lbl(f)),
@@ -239,7 +335,7 @@ impl Direct {
             }),
             Direct::Call(i, params) => f(Direct::Call(
                 i,
-                params.into_iter().map(|x| x.map(f)).collect(),
+                params.into_iter().map(|x| x.map_no_lbl(f)).collect(),
             )),
             x => f(x),
         }
@@ -250,9 +346,14 @@ impl Direct {
             Direct::Seq(a, b)
             | Direct::INumOp(_, _, a, b)
             | Direct::ICompOp(_, _, a, b)
+            | Direct::FCompOp(_, _, a, b)
+            | Direct::FNumOp(_, _, a, b)
             | Direct::If { t: a, f: b, .. }
             | Direct::Store(_, a, b) => b.fold_leaves(a.fold_leaves(start, f), f),
-            Direct::SetLocal(_, x) | Direct::Load(_, x) => x.fold_leaves(start, f),
+            Direct::SetLocal(_, x)
+            | Direct::Load(_, x)
+            | Direct::FUnOp(_, _, x)
+            | Direct::CvtOp(_, x) => x.fold_leaves(start, f),
             Direct::Call(_, params) => params.iter().fold(start, |acc, x| x.fold_leaves(acc, f)),
             x => f(start, x),
         }
@@ -367,7 +468,11 @@ impl Direct {
     fn insert(self, x: Self, offset: u32) -> Self {
         match &self {
             Direct::INumOp(_, _, _, _)
+            | Direct::FNumOp(_, _, _, _)
+            | Direct::FUnOp(_, _, _)
+            | Direct::CvtOp(_, _)
             | Direct::ICompOp(_, _, _, _)
+            | Direct::FCompOp(_, _, _, _)
             | Direct::SetLocal(_, _)
             | Direct::Load(_, _)
             | Direct::Store(_, _, _)
@@ -449,9 +554,17 @@ impl Direct {
             Direct::INumOp(w, op, a, b) => {
                 Base::INumOp(w, op, Box::new(a.base()), Box::new(b.base()))
             }
+            Direct::FNumOp(w, op, a, b) => {
+                Base::FNumOp(w, op, Box::new(a.base()), Box::new(b.base()))
+            }
             Direct::ICompOp(w, op, a, b) => {
                 Base::ICompOp(w, op, Box::new(a.base()), Box::new(b.base()))
             }
+            Direct::FCompOp(w, op, a, b) => {
+                Base::FCompOp(w, op, Box::new(a.base()), Box::new(b.base()))
+            }
+            Direct::CvtOp(op, a) => Base::CvtOp(op, Box::new(a.base())),
+            Direct::FUnOp(w, op, a) => Base::FUnOp(w, op, Box::new(a.base())),
             Direct::Const(c) => Base::Const(c),
             Direct::If { cond, t, f } => Base::If {
                 cond: Box::new(cond.base()),
@@ -632,6 +745,31 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                 ));
             }};
         }
+        macro_rules! fnumop {
+            ($w:ident, $op:ident) => {{
+                // They're on the stack as [a, b], so pop b and then a
+                let b = stack.pop().unwrap();
+                let a = stack.pop().unwrap();
+                stack.push(Direct::FNumOp(
+                    Width::$w,
+                    FNumOp::$op,
+                    Box::new(a),
+                    Box::new(b),
+                ));
+            }};
+        }
+        macro_rules! funop {
+            ($w:ident, $op:ident) => {{
+                let a = stack.pop().unwrap();
+                stack.push(Direct::FUnOp(Width::$w, FUnOp::$op, Box::new(a)));
+            }};
+        }
+        macro_rules! cvtop {
+            ($op:ident) => {{
+                let a = stack.pop().unwrap();
+                stack.push(Direct::CvtOp(CvtOp::$op, Box::new(a)));
+            }};
+        }
         macro_rules! compop {
             ($w:ident, $op:ident) => {{
                 // They're on the stack as [a, b], so pop b and then a
@@ -640,6 +778,19 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                 stack.push(Direct::ICompOp(
                     Width::$w,
                     ICompOp::$op,
+                    Box::new(a),
+                    Box::new(b),
+                ));
+            }};
+        }
+        macro_rules! fcompop {
+            ($w:ident, $op:ident) => {{
+                // They're on the stack as [a, b], so pop b and then a
+                let b = stack.pop().unwrap();
+                let a = stack.pop().unwrap();
+                stack.push(Direct::FCompOp(
+                    Width::$w,
+                    FCompOp::$op,
                     Box::new(a),
                     Box::new(b),
                 ));
@@ -726,6 +877,9 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                 I32Shl => numop!(W32, Shl),
                 I32ShrS => numop!(W32, ShrS),
                 I32ShrU => numop!(W32, ShrU),
+                I32And => numop!(W32, And),
+                I32Or => numop!(W32, Or),
+                I32Xor => numop!(W32, Xor),
                 I32Eq => compop!(W32, Eq),
                 I32Ne => compop!(W32, NEq),
                 I32LeU => compop!(W32, LeU),
@@ -736,6 +890,41 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                 I32LtS => compop!(W32, LtS),
                 I32GtU => compop!(W32, GtU),
                 I32GtS => compop!(W32, GtS),
+
+                I32Eqz => {
+                    let a = stack.pop().unwrap();
+                    let b = Direct::Const(Const::I32(0));
+                    stack.push(Direct::ICompOp(
+                        Width::W32,
+                        ICompOp::Eq,
+                        Box::new(a),
+                        Box::new(b),
+                    ))
+                }
+
+                F32Min => fnumop!(W32, Min),
+                F32Max => fnumop!(W32, Max),
+                F32Add => fnumop!(W32, Add),
+                F32Sub => fnumop!(W32, Sub),
+                F32Mul => fnumop!(W32, Mul),
+                F32Div => fnumop!(W32, Div),
+                F32Abs => funop!(W32, Abs),
+                F32Neg => funop!(W32, Neg),
+                F32Sqrt => funop!(W32, Sqrt),
+                F32Ceil => funop!(W32, Ceil),
+                F32Floor => funop!(W32, Floor),
+                F32Gt => fcompop!(W32, Gt),
+                F32Lt => fcompop!(W32, Lt),
+                F32Ge => fcompop!(W32, Ge),
+                F32Le => fcompop!(W32, Le),
+                F32Eq => fcompop!(W32, Eq),
+                F32Ne => fcompop!(W32, NEq),
+
+                I32TruncSF32 => cvtop!(F32toI32S),
+                I32TruncUF32 => cvtop!(F32toI32U),
+                F32ConvertSI32 => cvtop!(I32toF32S),
+                F32ConvertUI32 => cvtop!(I32toF32U),
+
                 Loop(_ty) => blocks.push(BlockTy::Loop(Vec::new())),
                 Block(_ty) => blocks.push(BlockTy::Block(Vec::new())),
                 If(_ty) => {

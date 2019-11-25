@@ -16,6 +16,10 @@ lazy_static = "*"
 [[example]]
 name = "vulkano"
 
+[[example]]
+name = "image"
+
 [dev-dependencies]
 vulkano = "*"
 wabt = "*"
+image = "*"

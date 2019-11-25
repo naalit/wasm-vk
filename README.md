@@ -15,7 +15,7 @@ Because of all this, we can create a WebAssembly embedder that runs on the GPU, 
 `wasm-vk` compiles a WebAssembly module into a Vulkan compute shader, currently with local size hardcoded as 64x1x1.
 WASM's *linear memory* is represented as a single Vulkan buffer, at descriptor set 0 and binding 0, which can be both read and written to by the shader.
 It uses the module's start function as the entry point, and shaders can define a global i32 "spv.id" which represents the thread index (gl_GlobalInvocationID.x, specifically).
-See `examples/comp.wat` for an example of a compute shader written in WebAssembly.
+See `examples/comp.wat` for an example of a compute shader written in WebAssembly, or `examples/image.wat` for one written in Rust and compiled to WebAssembly.
 
 We'll eventually add imports for other SPIR-V builtins, and we may use the atomic operations from the WebAssembly threads proposal, and probably force the memory to be marked `shared`.
 
@@ -40,6 +40,7 @@ When you're done, pass the `Module::start_section()` of the original Wasm `Modul
 
 Note that wasm-vk doesn't interact at all with Vulkan - it just produces SPIR-V bytes for use with any Vulkan library.
 See `examples/vulkano.rs` for an example using [`Vulkano`](https://crates.io/crates/vulkano) to load and run a WebAssembly compute shader.
+See `examples/image.rs` for an example of generating an image in a compute shader.
 
 # Current status
 See `examples/comp.wat` for most of what `wasm-vk` currently supports.
@@ -53,27 +54,17 @@ General operations:
 - local.set
 - local.get
 - local.tee
-Numeric operations:
-- i32.const
-- f32.const (but we don't support doing anything with f32s)
-- i32.add
-- i32.mul
-- i32.sub
-- i32.div_s
-- i32.div_u
-- i32.shl
-- i32.shr_s
-- i32.shr_u
-- i32.eq
-- i32.ne
-- i32.le_u
-- i32.le_s
-- i32.ge_u
-- i32.ge_s
-- i32.lt_u
-- i32.lt_s
-- i32.gt_u
-- i32.gt_s
+Numeric operations: All i32 and f32 instructions EXCEPT:
+- i32.clz
+- i32.ctz
+- i32.popcnt
+- i32.rem_*
+- i32.rotr
+- i32.rotl
+- f32.trunc
+- f32.nearest
+- f32.copysign
+- reinterpret instructions
 Control flow (note: we don't currently support blocks returning things):
 - loop
 - block
