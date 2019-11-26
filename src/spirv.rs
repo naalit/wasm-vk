@@ -1,4 +1,5 @@
 use crate::*;
+pub use dr::Module;
 use rspirv::dr;
 use spirv_headers as spvh;
 

@@ -32,15 +32,30 @@ Options:
 ```
 
 ### Library usage
-wasm-vk isn't on crates.io yet, but you can try it if you want.
-You can use `wasm_vk::ir::to_base()`, which you can pass a `parity-wasm` `Module`, to create a vector of functions in the `Base` IR.
-We re-export `deserialize` and `deserialize_file` from `parity-wasm`, but you can also create a `parity-wasm` `Module` yourself.
-Then you can create a `wasm_vk::spirv::Ctx` and pass each function to `Ctx::fun()`.
-When you're done, pass the `Module::start_section()` of the original Wasm `Module` to `Ctx::finish()` to get a `rspirv::dr::Module`, which you can pass to `wasm_vk::spirv::module_bytes` if you need the bytes to pass to Vulkan.
-
-Note that wasm-vk doesn't interact at all with Vulkan - it just produces SPIR-V bytes for use with any Vulkan library.
+`wasm-vk` isn't on crates.io yet, but you can try it if you want.
+Note that it doesn't interact at all with Vulkan - it just produces SPIR-V bytes for use with any Vulkan library.
 See `examples/vulkano.rs` for an example using [`Vulkano`](https://crates.io/crates/vulkano) to load and run a WebAssembly compute shader.
 See `examples/image.rs` for an example of generating an image in a compute shader.
+
+```rust
+use wasm_vk::*;
+
+// The type annotations make it clearer what everything returns
+// Grab the raw WASM from a file
+let w: wasm::Module = wasm::deserialize_file("examples/comp.wasm").unwrap();
+
+let base: ir::Base = ir::to_base(&w);
+
+let mut ctx = spirv::Ctx::new();
+for f in base {
+    ctx.fun(f);
+}
+// We pass it the start_section() so it knows which function is the entry point
+let m: spirv::Module = ctx.finish(w.start_section());
+
+// Assemble the SPIR-V to get the bytes for use with Vulkan
+let spv: Vec<u8> = spirv::module_bytes(m);
+```
 
 # Current status
 See `examples/comp.wat` for most of what `wasm-vk` currently supports.
