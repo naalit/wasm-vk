@@ -93,12 +93,8 @@ fn run_test(test: &'static str) -> std::io::Result<()> {
 /// so it will look like all tests failed.
 fn run_module(w: wasm::Module) -> Vec<u32> {
     // First, we generate SPIR-V
-    let base = ir::to_base(&w);
-    let mut ctx = spirv::Ctx::new();
-    for f in base {
-        ctx.fun(f);
-    }
-    let m = ctx.finish(w.start_section());
+    let ctx = spirv::Ctx::new();
+    let m = ctx.module(&w);
     println!("{}", {
         use rspirv::binary::Disassemble;
         m.disassemble()

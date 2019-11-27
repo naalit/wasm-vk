@@ -27,11 +27,17 @@ struct Loop {
     end: u32,
 }
 
+enum Fun {
+    BufGet(wasm::ValueType, u32),
+    BufSet(wasm::ValueType, u32),
+    /// Defined(fun, type)
+    Defined(u32, u32),
+}
+
 #[derive(Default)]
 pub struct Ctx {
     tys: Types,
     ptrs: HashMap<(wasm::ValueType, spvh::StorageClass), u32>,
-    buffer: u32,
     /// The x component of the thread id - unique to a function
     thread_id: u32,
     /// The thread id uvec3 - global
@@ -39,7 +45,7 @@ pub struct Ctx {
     locals: IndexMap<u32>,
     b: dr::Builder,
     /// (Function, type)
-    funs: Vec<(u32, u32)>,
+    funs: Vec<Fun>,
     loops: Vec<Loop>,
     ext: u32,
 }
@@ -56,7 +62,6 @@ impl Ctx {
         let mut c = Ctx {
             tys: Default::default(),
             ptrs: Default::default(),
-            buffer: 0,
             thread_id: 0,
             thread_id_v3: 0,
             locals: IndexMap::default(),
@@ -67,36 +72,36 @@ impl Ctx {
         };
 
         let t_uint = c.get(wasm::ValueType::I32);
-        let t_arr = c.type_runtime_array(t_uint);
-        let t_struct = c.type_struct([t_arr]);
-        let t_ptr = c.type_pointer(None, spvh::StorageClass::Uniform, t_struct);
-        let buffer = c.variable(t_ptr, None, spvh::StorageClass::Uniform, None);
-
-        // This is deprecated past SPIR-V 1.3, and should be replaced with the StorageBuffer StorageClass.
-        // I don't know that any Vulkan implementations actually support that yet, though, so this works for now.
-        c.decorate(t_struct, spvh::Decoration::BufferBlock, []);
-        // Set 0, binding 0
-        c.decorate(
-            buffer,
-            spvh::Decoration::DescriptorSet,
-            [dr::Operand::LiteralInt32(0)],
-        );
-        c.decorate(
-            buffer,
-            spvh::Decoration::Binding,
-            [dr::Operand::LiteralInt32(0)],
-        );
-        c.decorate(
-            t_arr,
-            spvh::Decoration::ArrayStride,
-            [dr::Operand::LiteralInt32(4)],
-        );
-        c.member_decorate(
-            t_struct,
-            0,
-            spvh::Decoration::Offset,
-            [dr::Operand::LiteralInt32(0)],
-        );
+        // let t_arr = c.type_runtime_array(t_uint);
+        // let t_struct = c.type_struct([t_arr]);
+        // let t_ptr = c.type_pointer(None, spvh::StorageClass::Uniform, t_struct);
+        // let buffer = c.variable(t_ptr, None, spvh::StorageClass::Uniform, None);
+        //
+        // // This is deprecated past SPIR-V 1.3, and should be replaced with the StorageBuffer StorageClass.
+        // // I don't know that any Vulkan implementations actually support that yet, though, so this works for now.
+        // c.decorate(t_struct, spvh::Decoration::BufferBlock, []);
+        // // Set 0, binding 0
+        // c.decorate(
+        //     buffer,
+        //     spvh::Decoration::DescriptorSet,
+        //     [dr::Operand::LiteralInt32(0)],
+        // );
+        // c.decorate(
+        //     buffer,
+        //     spvh::Decoration::Binding,
+        //     [dr::Operand::LiteralInt32(0)],
+        // );
+        // c.decorate(
+        //     t_arr,
+        //     spvh::Decoration::ArrayStride,
+        //     [dr::Operand::LiteralInt32(4)],
+        // );
+        // c.member_decorate(
+        //     t_struct,
+        //     0,
+        //     spvh::Decoration::Offset,
+        //     [dr::Operand::LiteralInt32(0)],
+        // );
 
         let t_uvec3 = c.type_vector(t_uint, 3);
         let t_uvec3_ptr = c.type_pointer(None, spvh::StorageClass::Input, t_uvec3);
@@ -107,13 +112,101 @@ impl Ctx {
             [dr::Operand::BuiltIn(spvh::BuiltIn::GlobalInvocationId)],
         );
 
-        Ctx {
-            buffer,
-            thread_id_v3,
-            ..c
+        Ctx { thread_id_v3, ..c }
+    }
+
+    pub fn module(mut self, m: &wasm::Module) -> dr::Module {
+        self.imports(m);
+        let base = ir::to_base(m);
+        for f in base {
+            self.fun(f);
+        }
+        self.finish(m.start_section())
+    }
+
+    /// Resolve imports from the module. Make sure to call this before `Ctx::fun()`
+    pub fn imports(&mut self, m: &wasm::Module) {
+        let mut bufs = HashMap::new();
+
+        for i in m.import_section().into_iter().flat_map(|x| x.entries()) {
+            if let wasm::External::Function(t) = i.external() {
+                if i.module() == "spv" {
+                    let f = i.field();
+                    let mut f = f.split(':');
+                    if f.next() == Some("buffer") {
+                        let set: u32 = f.next().unwrap().parse().unwrap();
+                        let binding: u32 = f.next().unwrap().parse().unwrap();
+                        let wasm::Type::Function(t) =
+                            &m.type_section().unwrap().types()[*t as usize];
+
+                        let d = f.next().unwrap();
+
+                        let elem_ty = if d == "load" {
+                            t.return_type().unwrap()
+                        } else if d == "store" {
+                            t.params()[1]
+                        } else {
+                            panic!("Invalid buffer import! Valid suffixes are :load and :store")
+                        };
+
+                        let buf = if let Some(x) = bufs.get(&(set, binding)) {
+                            *x
+                        } else {
+                            let t_elem = self.get(elem_ty);
+                            let t_arr = self.type_runtime_array(t_elem);
+                            let t_struct = self.type_struct([t_arr]);
+                            let t_ptr =
+                                self.type_pointer(None, spvh::StorageClass::Uniform, t_struct);
+                            let buffer =
+                                self.variable(t_ptr, None, spvh::StorageClass::Uniform, None);
+
+                            // This is deprecated past SPIR-V 1.3, and should be replaced with the StorageBuffer StorageClass.
+                            // I don't know that any Vulkan implementations actually support that yet, though, so this works for now.
+                            self.decorate(t_struct, spvh::Decoration::BufferBlock, []);
+
+                            self.decorate(
+                                buffer,
+                                spvh::Decoration::DescriptorSet,
+                                [dr::Operand::LiteralInt32(set)],
+                            );
+                            self.decorate(
+                                buffer,
+                                spvh::Decoration::Binding,
+                                [dr::Operand::LiteralInt32(binding)],
+                            );
+
+                            self.decorate(
+                                t_arr,
+                                spvh::Decoration::ArrayStride,
+                                [dr::Operand::LiteralInt32(4)],
+                            );
+                            self.member_decorate(
+                                t_struct,
+                                0,
+                                spvh::Decoration::Offset,
+                                [dr::Operand::LiteralInt32(0)],
+                            );
+
+                            bufs.insert((set, binding), buffer);
+
+                            buffer
+                        };
+
+                        let f = match &*d {
+                            "load" => Fun::BufGet(elem_ty, buf),
+                            "store" => Fun::BufSet(elem_ty, buf),
+                            _ => unreachable!(),
+                        };
+
+                        self.funs.push(f);
+                    }
+                }
+            }
         }
     }
 
+    /// Add a function to the SPIR-V module under construction.
+    /// Make sure to call `Ctx::imports()` before this to resolve imported buffers.
     pub fn fun(&mut self, f: ir::Fun<ir::Base>) {
         let ir::Fun { params, body, ty } = f;
         let locals = body.locals();
@@ -172,16 +265,19 @@ impl Ctx {
         }
         self.end_function().unwrap();
 
-        self.funs.push((fun, ret));
+        self.funs.push(Fun::Defined(fun, ret));
     }
 
     pub fn finish(mut self, entry: Option<u32>) -> dr::Module {
         if let Some(entry) = entry {
-            let (entry, _) = self.funs[entry as usize];
-
-            let id = self.thread_id_v3;
-            self.entry_point(spvh::ExecutionModel::GLCompute, entry, "main", [id]);
-            self.execution_mode(entry, spvh::ExecutionMode::LocalSize, [64, 1, 1]);
+            match self.funs[entry as usize] {
+                Fun::Defined(entry, _) => {
+                    let id = self.thread_id_v3;
+                    self.entry_point(spvh::ExecutionModel::GLCompute, entry, "main", [id]);
+                    self.execution_mode(entry, spvh::ExecutionMode::LocalSize, [64, 1, 1]);
+                }
+                _ => panic!("Only user defined functions can be the start function"),
+            }
         }
         self.b.module()
     }
@@ -280,10 +376,49 @@ impl ToSpirv for ir::Base {
     type Value = u32;
     fn spv(self, ctx: &mut Ctx) -> u32 {
         match self {
-            ir::Base::Call(i, params) => {
-                let (f, t) = ctx.funs[i as usize];
-                let params: Vec<_> = params.into_iter().map(|x| x.spv(ctx)).collect();
-                ctx.function_call(t, None, f, params).unwrap()
+            ir::Base::Call(i, mut params) => {
+                match ctx.funs[i as usize] {
+                    Fun::Defined(f, t) => {
+                        let params: Vec<_> = params.into_iter().map(|x| x.spv(ctx)).collect();
+                        ctx.function_call(t, None, f, params).unwrap()
+                    }
+                    Fun::BufGet(ty, buf) => {
+                        let ptr = params.pop().unwrap();
+
+                        let uint = ctx.get(wasm::ValueType::I32);
+                        let c0 = ctx.constant_u32(uint, 0);
+
+                        let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Uniform);
+                        let ty = ctx.get(ty);
+                        let ptr = ptr.spv(ctx);
+                        // Divide by four because of the size of a u32
+                        let c4 = ctx.constant_u32(uint, 4);
+                        let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
+
+                        let ptr = ctx.access_chain(ptr_ty, None, buf, [c0, ptr]).unwrap();
+                        ctx.load(ty, None, ptr, None, []).unwrap()
+                    }
+                    Fun::BufSet(ty, buf) => {
+                        let val = params.pop().unwrap();
+                        let ptr = params.pop().unwrap();
+
+                        let uint = ctx.get(wasm::ValueType::I32);
+                        let c0 = ctx.constant_u32(uint, 0);
+
+                        // The pointer is lower in the stack for the WASM store instruction, so it gets evaluated first.
+                        let ptr = ptr.spv(ctx);
+                        let val = val.spv(ctx);
+
+                        let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Uniform);
+                        // Divide by four because of the size of a u32
+                        let c4 = ctx.constant_u32(uint, 4);
+                        let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
+
+                        let ptr = ctx.access_chain(ptr_ty, None, buf, [c0, ptr]).unwrap();
+                        ctx.store(ptr, val, None, []).unwrap();
+                        0
+                    }
+                }
             }
             ir::Base::Nop => 0,
             ir::Base::INumOp(w, op, a, b) => {
@@ -444,38 +579,40 @@ impl ToSpirv for ir::Base {
                 );
                 ctx.thread_id
             }
-            ir::Base::Load(ty, ptr) => {
-                let uint = ctx.get(wasm::ValueType::I32);
-                let c0 = ctx.constant_u32(uint, 0);
-
-                let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Uniform);
-                let ty = ctx.get(ty);
-                let ptr = ptr.spv(ctx);
-                // Divide by four because of the size of a u32
-                let c4 = ctx.constant_u32(uint, 4);
-                let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
-
-                let buf = ctx.buffer;
-                let ptr = ctx.access_chain(ptr_ty, None, buf, [c0, ptr]).unwrap();
-                ctx.load(ty, None, ptr, None, []).unwrap()
+            ir::Base::Load(_ty, _ptr) => {
+                panic!("*.load not supported anymore! Use (import \"spv\" \"buffer:<set>:<binding>:load\" (func $load (param i32) (result <ty>)))")
+                // let uint = ctx.get(wasm::ValueType::I32);
+                // let c0 = ctx.constant_u32(uint, 0);
+                //
+                // let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Uniform);
+                // let ty = ctx.get(ty);
+                // let ptr = ptr.spv(ctx);
+                // // Divide by four because of the size of a u32
+                // let c4 = ctx.constant_u32(uint, 4);
+                // let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
+                //
+                // let buf = ctx.buffer;
+                // let ptr = ctx.access_chain(ptr_ty, None, buf, [c0, ptr]).unwrap();
+                // ctx.load(ty, None, ptr, None, []).unwrap()
             }
-            ir::Base::Store(ty, ptr, val) => {
-                let uint = ctx.get(wasm::ValueType::I32);
-                let c0 = ctx.constant_u32(uint, 0);
-
-                // The pointer is lower in the stack for the WASM store instruction, so it gets evaluated first.
-                let ptr = ptr.spv(ctx);
-                let val = val.spv(ctx);
-
-                let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Uniform);
-                // Divide by four because of the size of a u32
-                let c4 = ctx.constant_u32(uint, 4);
-                let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
-
-                let buf = ctx.buffer;
-                let ptr = ctx.access_chain(ptr_ty, None, buf, [c0, ptr]).unwrap();
-                ctx.store(ptr, val, None, []).unwrap();
-                0
+            ir::Base::Store(_ty, _ptr, _val) => {
+                panic!("*.store not supported anymore! Use (import \"spv\" \"buffer:<set>:<binding>:store\" (func $store (param i32 <ty>)))")
+                // let uint = ctx.get(wasm::ValueType::I32);
+                // let c0 = ctx.constant_u32(uint, 0);
+                //
+                // // The pointer is lower in the stack for the WASM store instruction, so it gets evaluated first.
+                // let ptr = ptr.spv(ctx);
+                // let val = val.spv(ctx);
+                //
+                // let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Uniform);
+                // // Divide by four because of the size of a u32
+                // let c4 = ctx.constant_u32(uint, 4);
+                // let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
+                //
+                // let buf = ctx.buffer;
+                // let ptr = ctx.access_chain(ptr_ty, None, buf, [c0, ptr]).unwrap();
+                // ctx.store(ptr, val, None, []).unwrap();
+                // 0
             }
             ir::Base::If { cond, t, f } => {
                 let l_t = ctx.id();

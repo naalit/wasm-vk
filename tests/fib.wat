@@ -15,7 +15,7 @@
 (module
   (start $main)
   (import "spv" "id" (global $id i32))
-  (memory 1)
+  (import "spv" "buffer:0:0:store" (func $store (param i32 i32)))
 
   (func $main
     (local $ptr i32)
@@ -41,7 +41,7 @@
       (if (i32.eq (local.get $i) (global.get $id))
       (then
         (; We've done the right number of iterations, so break ;)
-        (i32.store (local.get $ptr) (local.get $b))
+        (call $store (local.get $ptr) (local.get $b))
       ) (else
         (; Get the next number and continue ;)
         (local.set $tmp (local.get $a))

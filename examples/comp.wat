@@ -3,10 +3,11 @@
   (start $main)
   (; We declare an imported global for getting our thread index ;)
   (import "spv" "id" (global $id i32))
-  (; This is the buffer we're allowed to read and write
-     The size declared here doesn't matter, because wasm-vk needs to be passed a buffer
-     that the user has allocated with whatever size they want ;)
-  (memory $mem 1)
+
+  (; We have one buffer, at set=0 and binding=0, of type i32.
+     We specify buffers by importing load and store functions ;)
+  (import "spv" "buffer:0:0:store" (func $buf_store (param i32 i32)))
+  (import "spv" "buffer:0:0:load" (func $buf_load (param i32) (result i32)))
 
   (func $slot (result i32)
       (i32.mul
@@ -25,7 +26,7 @@
       (call $slot)
       )
     (local.set $val
-      (i32.load (local.get $ptr)))
+      (call $buf_load (local.get $ptr)))
     (; If this spot has a 1 in it, start looping ;)
     (if (i32.eq (local.get $val) (i32.const 1))
       (then
@@ -39,7 +40,7 @@
           (br_if $continue (i32.le_u (local.get $val) (i32.const 30)))
         )
         (; Store 676 to the buffer and exit ;)
-        (i32.store (local.get $ptr) (local.get $val))
+        (call $buf_store (local.get $ptr) (local.get $val))
         (return)
         ))
     (; If this spot has a 4 in it, change it to an 18,
@@ -48,12 +49,12 @@
       (then (local.set $val (i32.const 18))))
     (; If this spot has a 3 in it, return 512 ;)
     (if (i32.eq (local.get $val) (i32.const 3))
-      (then (i32.store (local.get $ptr) (i32.const 512)))
+      (then (call $buf_store (local.get $ptr) (i32.const 512)))
       (else
         (; If this spot has a 0 in it, skip the updating logic - leave it at 0 ;)
         (if (i32.eq (local.get $val) (i32.const 0))
           (then (br 1))) (; Note that we branch out of the enclosing else block ;)
-        (i32.store
+        (call $buf_store
           (local.get $ptr)
           (; Essentially ` *ptr = (*ptr * 12) + 3 ` ;)
           (i32.add

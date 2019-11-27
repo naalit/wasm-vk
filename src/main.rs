@@ -74,8 +74,6 @@ fn main() {
         );
     }
 
-    // We get our WASM from the 'comp.wasm' file, which is compiled from 'comp.wat'
-    // It multiplies every number by 12 and adds 3
     let w = wasm::deserialize_file(in_file)
         .expect("Deserialization error: are you sure this is valid WASM?");
 
@@ -84,12 +82,8 @@ fn main() {
     }
 
     // First, we generate SPIR-V
-    let base = ir::to_base(&w);
-    let mut ctx = spirv::Ctx::new();
-    for f in base {
-        ctx.fun(f);
-    }
-    let m = ctx.finish(w.start_section());
+    let ctx = spirv::Ctx::new();
+    let m = ctx.module(&w);
     let spv = spirv::module_bytes(m);
 
     if verbose {

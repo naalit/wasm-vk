@@ -23,13 +23,8 @@ fn main() {
     // It multiplies every number by 12 and adds 3
     let w = wasm::deserialize_file("examples/comp.wasm").unwrap();
 
-    // wasm_vk::ir::test(&w);
-    let base = ir::to_base(&w);
-    let mut ctx = spirv::Ctx::new();
-    for f in base {
-        ctx.fun(f);
-    }
-    let m = ctx.finish(w.start_section());
+    let ctx = spirv::Ctx::new();
+    let m = ctx.module(&w);
     let spv = spirv::module_bytes(m);
 
     // // Read SPIR-V from file instead of generating it - for debugging

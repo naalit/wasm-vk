@@ -5,37 +5,42 @@
 ;; I've been just using the Playground to compile it
 ;; Source code is at the bottom
 (module
+  (type $t1 (func (param i32) (result i32)))
+  (type $t2 (func (param i32 i32)))
   (import "spv" "id" (global $id i32)) ;; I changed it from a function to a global, because Rust doesn't support global imports
+  (import "spv" "buffer:0:0:load" (func $buffer:0:0:load (type $t1)))
+  (import "spv" "buffer:0:0:store" (func $buffer:0:0:store (type $t2)))
   (func $main (export "main") ;; I also removed the arguments and the result
-    (local $l2 i32) (local $l3 i32) (local $l4 i32)
+    (local $l2 i32) (local $l3 i32)
     (local.set $l2
       (i32.const 0))
     (block $B0
       (br_if $B0
         (i32.gt_u
-          (local.tee $l4
-            (i32.load
-              (local.tee $l3
-                (i32.shl
+          (local.tee $l3
+            (call $buffer:0:0:load
+              (i32.shl
                   (get_global $id) ;; Changed from a call to get_global
-                  (i32.const 2)))))
+                  (i32.const 2))))
           (i32.const 4)))
       (; The Rust compiler used the heap for this pattern matching, but we don't allow that so I rewrote this bit
       (local.set $l2
         (i32.load
           (i32.add
             (i32.shl
-              (local.get $l4)
+              (local.get $l3)
               (i32.const 2))
             (i32.const 1048576)))
             )
             ;)
       ;; Here's the rewrite
-      (if (i32.eq (local.get $l4) (i32.const 4))
+      (if (i32.eq (local.get $l3) (i32.const 4))
         (then (local.set $l2 (i32.const 12)))
-        (else (if (i32.ne (local.get $l4) (i32.const 3)) (then (local.set $l2 (i32.add (local.get $l4) (i32.const 1))))))))
-    (i32.store
-      (local.get $l3)
+        (else (if (i32.ne (local.get $l3) (i32.const 3)) (then (local.set $l2 (i32.add (local.get $l3) (i32.const 1))))))))
+    (call $buffer:0:0:store
+      (i32.shl
+        (get_global $id) ;; Changed from call $id
+        (i32.const 2))
       (local.get $l2))) ;; Removed a return value of 0
   (start $main) ;; I added this too
   (table $T0 1 1 funcref)

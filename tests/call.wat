@@ -2,7 +2,8 @@
 (module
   (start $main)
   (import "spv" "id" (global $id i32))
-  (memory 1)
+
+  (import "spv" "buffer:0:0:store" (func $buf_store (param i32 i32)))
 
   (func $inc
     (param $p i32)
@@ -13,7 +14,7 @@
   ;; one.wat tests one with no parameters that returns a value
   (func $store
     (param $val i32)
-    (i32.store
+    (call $buf_store
       (i32.mul
         (i32.const 4)
         (global.get $id))

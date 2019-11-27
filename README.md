@@ -13,11 +13,11 @@ Because of all this, we can create a WebAssembly embedder that runs on the GPU, 
 
 # Mapping
 `wasm-vk` compiles a WebAssembly module into a Vulkan compute shader, currently with local size hardcoded as 64x1x1.
-WASM's *linear memory* is represented as a single Vulkan buffer, at descriptor set 0 and binding 0, which can be both read and written to by the shader.
+WASM modules define readable and writeable buffers with specially named imports of load and store functions, for example "buffer:0:2:load" for a buffer at set=0 and binding=2.
 It uses the module's start function as the entry point, and shaders can define a global i32 "spv.id" which represents the thread index (gl_GlobalInvocationID.x, specifically).
-See `examples/comp.wat` for an example of a compute shader written in WebAssembly, or `examples/image.wat` for one written in Rust and compiled to WebAssembly.
+We'll eventually add imports for other SPIR-V builtins.
 
-We'll eventually add imports for other SPIR-V builtins, and we may use the atomic operations from the WebAssembly threads proposal, and probably force the memory to be marked `shared`.
+See `examples/comp.wat` for an example of a compute shader written in WebAssembly, or `examples/image.wat` for one written in Rust and compiled to WebAssembly.
 
 # Usage
 ### Command-line usage
@@ -44,14 +44,9 @@ use wasm_vk::*;
 // Grab the raw WASM from a file
 let w: wasm::Module = wasm::deserialize_file("examples/comp.wasm").unwrap();
 
-let base: ir::Base = ir::to_base(&w);
-
-let mut ctx = spirv::Ctx::new();
-for f in base {
-    ctx.fun(f);
-}
-// We pass it the start_section() so it knows which function is the entry point
-let m: spirv::Module = ctx.finish(w.start_section());
+let ctx = spirv::Ctx::new();
+// This translates it to wasm-vk's IR and then to SPIR-V
+let m: spirv::Module = ctx.module(&w);
 
 // Assemble the SPIR-V to get the bytes for use with Vulkan
 let spv: Vec<u8> = spirv::module_bytes(m);
@@ -63,8 +58,6 @@ Supported instructions:
 ```
 General operations:
 - nop
-- i32.load
-- i32.store
 - global.get (just for 'spv.id' builtin)
 - local.set
 - local.get

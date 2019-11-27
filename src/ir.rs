@@ -797,13 +797,32 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
             }};
         }
 
+        let fun_tys: Vec<_> = w
+            .import_section()
+            .into_iter()
+            .flat_map(|x| x.entries())
+            .filter_map(|x| {
+                if let wasm::External::Function(t) = x.external() {
+                    Some(*t)
+                } else {
+                    None
+                }
+            })
+            .chain(
+                w.function_section()
+                    .unwrap()
+                    .entries()
+                    .iter()
+                    .map(|x| x.type_ref()),
+            )
+            .collect();
+
         for op in code.elements() {
             use wasm::Instruction::*;
             match op {
                 Call(i) => {
-                    let f = &w.function_section().unwrap().entries()[*i as usize];
-                    let wasm::Type::Function(f) =
-                        &w.type_section().unwrap().types()[f.type_ref() as usize];
+                    let f = fun_tys[*i as usize]; //w.function_section().unwrap().entries()[*i as usize];
+                    let wasm::Type::Function(f) = &w.type_section().unwrap().types()[f as usize];
                     let mut params: Vec<_> =
                         f.params().iter().map(|_x| stack.pop().unwrap()).collect();
                     // The arguments are stored on the stack in reverse order
