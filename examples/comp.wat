@@ -9,11 +9,14 @@
   (import "spv" "buffer:0:0:store" (func $buf_store (param i32 i32)))
   (import "spv" "buffer:0:0:load" (func $buf_load (param i32) (result i32)))
 
+  (memory 1)
+
   (func $slot (result i32)
-      (i32.mul
+      (i32.store (i32.const 0) (i32.mul
         (i32.const 4)
         (global.get $id)
-      )
+      ))
+      (i32.load (i32.const 0))
   )
 
   (; 'main' is a start function, so it doesn't have any parameters or return anything ;)

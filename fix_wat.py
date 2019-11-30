@@ -17,10 +17,10 @@
 #     }
 # }
 # ```
-# Watch out for unintended loads and stores, because rustc does use them.
-# These can happen in pattern matching, moving structs around, and some conversions.
-# If you see a data section at the end, that's definitely a problem,
-#   and you should always make sure that there are the right number of load and store instructions.
+# We emulate linear memory for loads and stores, but make sure your Rust code doesn't use more that about 64 bytes of it
+# Also, having a data section and also using loads and stores for other purposes (e.g. pattern matching or certain conversions) probably won't work
+# - it will actually fail silently, essentially segfaulting on the GPU, so watch out for that
+# TODO fix that - it's not that hard
 
 i = ""
 while True:

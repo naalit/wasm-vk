@@ -109,6 +109,7 @@ pub enum Base {
     CvtOp(CvtOp, Box<Base>),
     FUnOp(Width, FUnOp, Box<Base>),
     SetLocal(Local, Box<Base>),
+    SetGlobal(Global, Box<Base>),
     GetLocal(Local),
     GetGlobal(Global),
     Loop(Box<Base>),
@@ -145,6 +146,7 @@ impl Base {
             Base::Seq(a, b) => f(Base::Seq(Box::new(a.map(f)), Box::new(b.map(f)))),
             Base::Store(t, a, b) => f(Base::Store(t, Box::new(a.map(f)), Box::new(b.map(f)))),
             Base::SetLocal(u, x) => f(Base::SetLocal(u, Box::new(x.map(f)))),
+            Base::SetGlobal(u, x) => f(Base::SetGlobal(u, Box::new(x.map(f)))),
             Base::Load(t, p) => f(Base::Load(t, Box::new(p.map(f)))),
             Base::Loop(a) => f(Base::Loop(Box::new(a.map(f)))),
             Base::If { cond, t, f: fa } => f(Base::If {
@@ -171,6 +173,7 @@ impl Base {
             | Base::Store(_, a, b) => b.fold_leaves(a.fold_leaves(start, f), f),
             Base::Loop(x)
             | Base::SetLocal(_, x)
+            | Base::SetGlobal(_, x)
             | Base::Load(_, x)
             | Base::CvtOp(_, x)
             | Base::FUnOp(_, _, x) => x.fold_leaves(start, f),
@@ -178,7 +181,8 @@ impl Base {
             x => f(start, x),
         }
     }
-    fn fold<T>(&self, start: T, f: &impl Fn(T, &Self) -> T) -> T {
+
+    pub fn fold<T>(&self, start: T, f: &impl Fn(T, &Self) -> T) -> T {
         let n = f(start, self);
         match self {
             Base::Seq(a, b)
@@ -190,6 +194,7 @@ impl Base {
             | Base::Store(_, a, b) => b.fold(a.fold(n, f), f),
             Base::Loop(x)
             | Base::SetLocal(_, x)
+            | Base::SetGlobal(_, x)
             | Base::Load(_, x)
             | Base::CvtOp(_, x)
             | Base::FUnOp(_, _, x) => x.fold(n, f),
@@ -223,6 +228,7 @@ enum Direct {
     CvtOp(CvtOp, Box<Direct>),
     FUnOp(Width, FUnOp, Box<Direct>),
     SetLocal(Local, Box<Direct>),
+    SetGlobal(Global, Box<Direct>),
     GetLocal(Local),
     GetGlobal(Global),
     Seq(Box<Direct>, Box<Direct>),
@@ -273,6 +279,7 @@ impl Direct {
             Direct::Seq(a, b) => f(Direct::Seq(Box::new(a.map(f)), Box::new(b.map(f)))),
             Direct::Store(t, a, b) => f(Direct::Store(t, Box::new(a.map(f)), Box::new(b.map(f)))),
             Direct::SetLocal(u, x) => f(Direct::SetLocal(u, Box::new(x.map(f)))),
+            Direct::SetGlobal(u, x) => f(Direct::SetGlobal(u, Box::new(x.map(f)))),
             Direct::Load(t, p) => f(Direct::Load(t, Box::new(p.map(f)))),
             Direct::Label(a) => f(Direct::Label(Box::new(a.map(f)))),
             Direct::Loop(a) => f(Direct::Loop(Box::new(a.map(f)))),
@@ -327,6 +334,7 @@ impl Direct {
                 Box::new(b.map_no_lbl(f)),
             )),
             Direct::SetLocal(u, x) => f(Direct::SetLocal(u, Box::new(x.map_no_lbl(f)))),
+            Direct::SetGlobal(u, x) => f(Direct::SetGlobal(u, Box::new(x.map_no_lbl(f)))),
             Direct::Load(t, p) => f(Direct::Load(t, Box::new(p.map_no_lbl(f)))),
             Direct::If { cond, t, f: fa } => f(Direct::If {
                 cond: Box::new(cond.map_no_lbl(f)),
@@ -351,6 +359,7 @@ impl Direct {
             | Direct::If { t: a, f: b, .. }
             | Direct::Store(_, a, b) => b.fold_leaves(a.fold_leaves(start, f), f),
             Direct::SetLocal(_, x)
+            | Direct::SetGlobal(_, x)
             | Direct::Load(_, x)
             | Direct::FUnOp(_, _, x)
             | Direct::CvtOp(_, x) => x.fold_leaves(start, f),
@@ -474,6 +483,7 @@ impl Direct {
             | Direct::ICompOp(_, _, _, _)
             | Direct::FCompOp(_, _, _, _)
             | Direct::SetLocal(_, _)
+            | Direct::SetGlobal(_, _)
             | Direct::Load(_, _)
             | Direct::Store(_, _, _)
                 if self.br().is_some() =>
@@ -584,6 +594,7 @@ impl Direct {
             }
             Direct::Store(t, a, b) => Base::Store(t, Box::new(a.base()), Box::new(b.base())),
             Direct::SetLocal(l, v) => Base::SetLocal(l, Box::new(v.base())),
+            Direct::SetGlobal(l, v) => Base::SetGlobal(l, Box::new(v.base())),
             Direct::Load(t, p) => Base::Load(t, Box::new(p.base())),
             Direct::Break => Base::Break,
             Direct::Continue => Base::Continue,
@@ -597,7 +608,7 @@ impl Direct {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Fun<T> {
     pub params: Vec<wasm::ValueType>,
     pub body: T,
@@ -853,13 +864,36 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                         .unwrap()
                         .push(Direct::SetLocal(Local { ty, idx: *u }, Box::new(val)));
                 }
-                I32Load(_, _) => {
+                SetGlobal(u) => {
+                    let val = stack.pop().unwrap();
+                    let ty = globals[*u as usize];
+                    blocks
+                        .last_mut()
+                        .unwrap()
+                        .push(Direct::SetGlobal(Global { ty, idx: *u }, Box::new(val)));
+                }
+                I32Load(_, 0) => {
                     let val = stack.pop().unwrap();
                     stack.push(Direct::Load(wasm::ValueType::I32, Box::new(val)))
                 }
-                I32Store(_, _) => {
+                I32Load(_, offset) => {
+                    let val = stack.pop().unwrap();
+                    let val = Direct::INumOp(Width::W32, INumOp::Add, Box::new(val), Box::new(Direct::Const(Const::I32(*offset as i32))));
+                    stack.push(Direct::Load(wasm::ValueType::I32, Box::new(val)))
+                }
+                I32Store(_, 0) => {
                     let val = stack.pop().unwrap();
                     let ptr = stack.pop().unwrap();
+                    blocks.last_mut().unwrap().push(Direct::Store(
+                        wasm::ValueType::I32,
+                        Box::new(ptr),
+                        Box::new(val),
+                    ))
+                }
+                I32Store(_, offset) => {
+                    let val = stack.pop().unwrap();
+                    let ptr = stack.pop().unwrap();
+                    let ptr = Direct::INumOp(Width::W32, INumOp::Add, Box::new(ptr), Box::new(Direct::Const(Const::I32(*offset as i32))));
                     blocks.last_mut().unwrap().push(Direct::Store(
                         wasm::ValueType::I32,
                         Box::new(ptr),

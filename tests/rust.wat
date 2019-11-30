@@ -23,7 +23,6 @@
                   (get_global $id) ;; Changed from a call to get_global
                   (i32.const 2))))
           (i32.const 4)))
-      (; The Rust compiler used the heap for this pattern matching, but we don't allow that so I rewrote this bit
       (local.set $l2
         (i32.load
           (i32.add
@@ -31,12 +30,7 @@
               (local.get $l3)
               (i32.const 2))
             (i32.const 1048576)))
-            )
-            ;)
-      ;; Here's the rewrite
-      (if (i32.eq (local.get $l3) (i32.const 4))
-        (then (local.set $l2 (i32.const 12)))
-        (else (if (i32.ne (local.get $l3) (i32.const 3)) (then (local.set $l2 (i32.add (local.get $l3) (i32.const 1))))))))
+            ))
     (call $buffer:0:0:store
       (i32.shl
         (get_global $id) ;; Changed from call $id

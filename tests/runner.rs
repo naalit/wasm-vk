@@ -32,6 +32,7 @@ macro_rules! test {
 // ACTUALY TESTS
 // --------------------
 
+test!(memory);
 test!(one);
 test!(fib);
 test!(rust);
@@ -100,6 +101,11 @@ fn run_module(w: wasm::Module) -> Vec<u32> {
         m.disassemble()
     });
     let spv = spirv::module_bytes(m);
+
+    // // We write the SPIR-V to disk so we can disassemble it later if we want
+    // use std::io::Write;
+    // let mut f = std::fs::File::create("examples/comp.spv").unwrap();
+    // f.write_all(&spv).unwrap();
 
     // Here's the data we'll be using, it's just BUFFER_SIZE consecutive u32s, starting at 0
     let data_iter = 0..BUFFER_SIZE as u32;

@@ -19,6 +19,15 @@ We'll eventually add imports for other SPIR-V builtins.
 
 See `examples/comp.wat` for an example of a compute shader written in WebAssembly, or `examples/image.wat` for one written in Rust and compiled to WebAssembly.
 
+## Linear memory
+We emulate a heap for linear memory with a stack-allocated array if the WASM module needs it.
+It's always exactly 128 bytes in size - it panics if the data section is bigger than that, but has undefined behaviour if a load or store in the shader goes over.
+We're somewhat intelligent about which 128 bytes to use, though. If a data section is present, the 128 bytes starts at the beginning of the data section.
+Otherwise, it starts 64 bytes before the pointer passed to the first load or store.
+That's enough to work with LLVM's bump-down stack allocator in most cases.
+
+Note that only loads and stores aligned to 4-byte boundaries will work currently.
+
 # Usage
 ### Command-line usage
 ```

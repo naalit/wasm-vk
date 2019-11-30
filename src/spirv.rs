@@ -11,6 +11,7 @@ trait ToSpirv {
 
 #[derive(Default)]
 struct Types {
+    void: Option<u32>,
     b: Option<u32>,
     i_32: Option<u32>,
     i_64: Option<u32>,
@@ -27,28 +28,63 @@ struct Loop {
     end: u32,
 }
 
+#[derive(Debug, Clone)]
 enum Fun {
     BufGet(wasm::ValueType, u32),
     BufSet(wasm::ValueType, u32),
-    /// Defined(fun, type)
-    Defined(u32, u32),
+    /// Defined(fun, type, sets heap_offset)
+    Defined {
+        fun: u32,
+        ret_ty: u32,
+        could_set_offset: bool,
+        offset_setting_version: Option<u32>,
+        code: ir::Fun<ir::Base>,
+    },
 }
 
-#[derive(Default)]
+#[derive(Copy, Clone, Debug)]
+enum SGlobal {
+    User(wasm::ValueType, u32),
+    ThreadId,
+}
+impl SGlobal {
+    fn get(self, ctx: &mut Ctx) -> u32 {
+        match self {
+            SGlobal::ThreadId => ctx.thread_id,
+            SGlobal::User(t, u) => {
+                let t = ctx.get(t);
+                ctx.load(t, None, u, None, []).unwrap()
+            }
+        }
+    }
+}
+
 pub struct Ctx {
     tys: Types,
     ptrs: HashMap<(wasm::ValueType, spvh::StorageClass), u32>,
+    fun_tys: HashMap<(u32, Vec<wasm::ValueType>), u32>,
     /// The x component of the thread id - unique to a function
     thread_id: u32,
     /// The thread id uvec3 - global
     thread_id_v3: u32,
     locals: IndexMap<u32>,
+    globals: IndexMap<SGlobal>,
     b: dr::Builder,
-    /// (Function, type)
+    heap: u32,
+    /// (The SPIR-V variable, whether this has been set yet)
+    heap_offset: (u32, bool),
+    /// (The function, the function setting offset, the code)
     funs: Vec<Fun>,
     loops: Vec<Loop>,
     ext: u32,
 }
+
+impl Default for spirv::Ctx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Ctx {
     pub fn new() -> Self {
         let mut b = dr::Builder::new();
@@ -62,9 +98,13 @@ impl Ctx {
         let mut c = Ctx {
             tys: Default::default(),
             ptrs: Default::default(),
+            fun_tys: Default::default(),
             thread_id: 0,
             thread_id_v3: 0,
             locals: IndexMap::default(),
+            globals: IndexMap::with_capacity(1),
+            heap: 0,
+            heap_offset: (0, false),
             b,
             funs: Vec::new(),
             loops: Vec::new(),
@@ -72,36 +112,7 @@ impl Ctx {
         };
 
         let t_uint = c.get(wasm::ValueType::I32);
-        // let t_arr = c.type_runtime_array(t_uint);
-        // let t_struct = c.type_struct([t_arr]);
-        // let t_ptr = c.type_pointer(None, spvh::StorageClass::Uniform, t_struct);
-        // let buffer = c.variable(t_ptr, None, spvh::StorageClass::Uniform, None);
-        //
-        // // This is deprecated past SPIR-V 1.3, and should be replaced with the StorageBuffer StorageClass.
-        // // I don't know that any Vulkan implementations actually support that yet, though, so this works for now.
-        // c.decorate(t_struct, spvh::Decoration::BufferBlock, []);
-        // // Set 0, binding 0
-        // c.decorate(
-        //     buffer,
-        //     spvh::Decoration::DescriptorSet,
-        //     [dr::Operand::LiteralInt32(0)],
-        // );
-        // c.decorate(
-        //     buffer,
-        //     spvh::Decoration::Binding,
-        //     [dr::Operand::LiteralInt32(0)],
-        // );
-        // c.decorate(
-        //     t_arr,
-        //     spvh::Decoration::ArrayStride,
-        //     [dr::Operand::LiteralInt32(4)],
-        // );
-        // c.member_decorate(
-        //     t_struct,
-        //     0,
-        //     spvh::Decoration::Offset,
-        //     [dr::Operand::LiteralInt32(0)],
-        // );
+        let heap_offset = (c.constant_u32(t_uint, 0), false);
 
         let t_uvec3 = c.type_vector(t_uint, 3);
         let t_uvec3_ptr = c.type_pointer(None, spvh::StorageClass::Input, t_uvec3);
@@ -112,169 +123,368 @@ impl Ctx {
             [dr::Operand::BuiltIn(spvh::BuiltIn::GlobalInvocationId)],
         );
 
-        Ctx { thread_id_v3, ..c }
+        Ctx {
+            thread_id_v3,
+            heap_offset,
+            ..c
+        }
     }
 
     pub fn module(mut self, m: &wasm::Module) -> dr::Module {
         self.imports(m);
+        let set_offset = !self.heap_offset.1;
         let base = ir::to_base(m);
         for f in base {
-            self.fun(f);
+            let ret_ty = f.ty.map_or(self.void(), |x| self.get(x));
+            // TODO what if this function calls another function that sets offset?
+            let could_set_offset = f.body.fold(false, &|acc, x| match x {
+                ir::Base::Store(_, _, _) => true,
+                ir::Base::Load(_, _) => true,
+                _ => acc,
+            });
+            let fun = self.id();
+            self.funs.push(Fun::Defined {
+                fun,
+                ret_ty,
+                could_set_offset,
+                offset_setting_version: None,
+                code: f,
+            });
         }
-        self.finish(m.start_section())
+        for i in 0..self.funs.len() as u32 {
+            self.fun(i, false);
+        }
+        self.finish(m.start_section(), set_offset)
+    }
+
+    pub fn fun_ty(&mut self, ret: u32, param_tys: Vec<wasm::ValueType>) -> u32 {
+        if let Some(v) = self.fun_tys.get(&(ret, param_tys.clone())) {
+            *v
+        } else {
+            let params: Vec<_> = param_tys.iter().map(|x| self.get(*x)).collect();
+            let v = self.type_function(ret, params);
+            self.fun_tys.insert((ret, param_tys), v);
+            v
+        }
+    }
+
+    pub fn void(&mut self) -> u32 {
+        if let Some(v) = self.tys.void {
+            v
+        } else {
+            let v = self.type_void();
+            self.tys.void = Some(v);
+            v
+        }
     }
 
     /// Resolve imports from the module. Make sure to call this before `Ctx::fun()`
+    /// Also handles heap allocation if necessary
     pub fn imports(&mut self, m: &wasm::Module) {
+        if m.memory_section().is_some() {
+            let t_uint = self.get(wasm::ValueType::I32);
+            let c_32 = self.constant_u32(t_uint, 32); // 128 bytes
+            let t_arr = self.type_array(t_uint, c_32);
+            let c_0 = self.constant_u32(t_uint, 0);
+            let data: Vec<u32> = if let Some(section) = m.data_section() {
+                assert_eq!(
+                    section.entries().len(),
+                    1,
+                    "wasm-vk currently only supports one data segment!"
+                );
+                let e = &section.entries()[0];
+
+                let offset = match e.offset() {
+                    None => (std::i32::MAX, false),
+                    Some(i) => match i.code() {
+                        // If the data section has an offset, prefer that one
+                        [wasm::Instruction::I32Const(i), wasm::Instruction::End] => (*i, true),
+                        _ => panic!("wasm-vk doesn't currently support offset expressions other than i32.const! Got instructions {:?}", i.code()),
+                    }
+                };
+                let offset = (
+                    self.constant_u32(t_uint, unsafe { std::mem::transmute(offset.0) }),
+                    offset.1,
+                );
+                self.heap_offset = offset;
+
+                use std::convert::TryInto;
+                // We store the bytes as little-endian
+                let mut v: Vec<u32> = e
+                    .value()
+                    .chunks(4)
+                    .map(|x| {
+                        u32::from_le_bytes(x.try_into().expect("Data section not a multiple of 4"))
+                    })
+                    .map(|x| self.constant_u32(t_uint, x))
+                    .collect();
+                assert!(v.len() <= 32, "Memory size must be <= 128 bytes");
+                // The linear memory is always exactly 128 bytes
+                v.extend(std::iter::repeat(c_0).take(32 - v.len()));
+                v
+            } else {
+                (0..32).map(|_| c_0).collect()
+            };
+
+            let t_uint_ptr = self.type_pointer(None, spvh::StorageClass::Private, t_uint);
+            let mut offset = self.heap_offset;
+            offset.0 = self.variable(
+                t_uint_ptr,
+                None,
+                spvh::StorageClass::Private,
+                Some(offset.0),
+            );
+            self.heap_offset = offset;
+
+            let data = self.constant_composite(t_arr, data);
+
+            let t_arr_ptr = self.type_pointer(None, spvh::StorageClass::Private, t_arr);
+            let mem = self.variable(t_arr_ptr, None, spvh::StorageClass::Private, Some(data));
+
+            self.heap = mem;
+        }
+
         let mut bufs = HashMap::new();
 
+        let mut global_idx = 0;
+
         for i in m.import_section().into_iter().flat_map(|x| x.entries()) {
-            if let wasm::External::Function(t) = i.external() {
-                if i.module() == "spv" {
-                    let f = i.field();
-                    let mut f = f.split(':');
-                    if f.next() == Some("buffer") {
-                        let set: u32 = f.next().unwrap().parse().unwrap();
-                        let binding: u32 = f.next().unwrap().parse().unwrap();
-                        let wasm::Type::Function(t) =
-                            &m.type_section().unwrap().types()[*t as usize];
+            match i.external() {
+                wasm::External::Global(_) => {
+                    if i.module() == "spv" && i.field() == "id" {
+                        self.globals.insert(global_idx, SGlobal::ThreadId);
+                    } else {
+                        panic!("Error: import {:?}", i)
+                    }
 
-                        let d = f.next().unwrap();
+                    global_idx += 1;
+                }
+                wasm::External::Function(t) => {
+                    if i.module() == "spv" {
+                        let f = i.field();
+                        let mut f = f.split(':');
+                        if f.next() == Some("buffer") {
+                            let set: u32 = f.next().unwrap().parse().unwrap();
+                            let binding: u32 = f.next().unwrap().parse().unwrap();
+                            let wasm::Type::Function(t) =
+                                &m.type_section().unwrap().types()[*t as usize];
 
-                        let elem_ty = if d == "load" {
-                            t.return_type().unwrap()
-                        } else if d == "store" {
-                            t.params()[1]
-                        } else {
-                            panic!("Invalid buffer import! Valid suffixes are :load and :store")
-                        };
+                            let d = f.next().unwrap();
 
-                        let buf = if let Some(x) = bufs.get(&(set, binding)) {
-                            *x
-                        } else {
-                            let t_elem = self.get(elem_ty);
-                            let t_arr = self.type_runtime_array(t_elem);
-                            let t_struct = self.type_struct([t_arr]);
-                            let t_ptr =
-                                self.type_pointer(None, spvh::StorageClass::Uniform, t_struct);
-                            let buffer =
-                                self.variable(t_ptr, None, spvh::StorageClass::Uniform, None);
+                            let elem_ty = if d == "load" {
+                                t.return_type().unwrap()
+                            } else if d == "store" {
+                                t.params()[1]
+                            } else {
+                                panic!("Invalid buffer import! Valid suffixes are :load and :store")
+                            };
 
-                            // This is deprecated past SPIR-V 1.3, and should be replaced with the StorageBuffer StorageClass.
-                            // I don't know that any Vulkan implementations actually support that yet, though, so this works for now.
-                            self.decorate(t_struct, spvh::Decoration::BufferBlock, []);
+                            let buf = if let Some(x) = bufs.get(&(set, binding)) {
+                                *x
+                            } else {
+                                let t_elem = self.get(elem_ty);
+                                let t_arr = self.type_runtime_array(t_elem);
+                                let t_struct = self.type_struct([t_arr]);
+                                let t_ptr =
+                                    self.type_pointer(None, spvh::StorageClass::Uniform, t_struct);
+                                let buffer =
+                                    self.variable(t_ptr, None, spvh::StorageClass::Uniform, None);
 
-                            self.decorate(
-                                buffer,
-                                spvh::Decoration::DescriptorSet,
-                                [dr::Operand::LiteralInt32(set)],
-                            );
-                            self.decorate(
-                                buffer,
-                                spvh::Decoration::Binding,
-                                [dr::Operand::LiteralInt32(binding)],
-                            );
+                                // This is deprecated past SPIR-V 1.3, and should be replaced with the StorageBuffer StorageClass.
+                                // I don't know that any Vulkan implementations actually support that yet, though, so this works for now.
+                                self.decorate(t_struct, spvh::Decoration::BufferBlock, []);
 
-                            self.decorate(
-                                t_arr,
-                                spvh::Decoration::ArrayStride,
-                                [dr::Operand::LiteralInt32(4)],
-                            );
-                            self.member_decorate(
-                                t_struct,
-                                0,
-                                spvh::Decoration::Offset,
-                                [dr::Operand::LiteralInt32(0)],
-                            );
+                                self.decorate(
+                                    buffer,
+                                    spvh::Decoration::DescriptorSet,
+                                    [dr::Operand::LiteralInt32(set)],
+                                );
+                                self.decorate(
+                                    buffer,
+                                    spvh::Decoration::Binding,
+                                    [dr::Operand::LiteralInt32(binding)],
+                                );
 
-                            bufs.insert((set, binding), buffer);
+                                self.decorate(
+                                    t_arr,
+                                    spvh::Decoration::ArrayStride,
+                                    [dr::Operand::LiteralInt32(4)],
+                                );
+                                self.member_decorate(
+                                    t_struct,
+                                    0,
+                                    spvh::Decoration::Offset,
+                                    [dr::Operand::LiteralInt32(0)],
+                                );
 
-                            buffer
-                        };
+                                bufs.insert((set, binding), buffer);
 
-                        let f = match &*d {
-                            "load" => Fun::BufGet(elem_ty, buf),
-                            "store" => Fun::BufSet(elem_ty, buf),
-                            _ => unreachable!(),
-                        };
+                                buffer
+                            };
 
-                        self.funs.push(f);
+                            let f = match &*d {
+                                "load" => Fun::BufGet(elem_ty, buf),
+                                "store" => Fun::BufSet(elem_ty, buf),
+                                _ => unreachable!(),
+                            };
+
+                            self.funs.push(f);
+                        }
                     }
                 }
-            }
-        }
-    }
-
-    /// Add a function to the SPIR-V module under construction.
-    /// Make sure to call `Ctx::imports()` before this to resolve imported buffers.
-    pub fn fun(&mut self, f: ir::Fun<ir::Base>) {
-        let ir::Fun { params, body, ty } = f;
-        let locals = body.locals();
-
-        let ret = if let Some(ty) = ty {
-            self.get(ty)
-        } else {
-            self.type_void()
-        };
-        let param_tys: Vec<_> = params.iter().map(|x| self.get(*x)).collect();
-        let t = self.type_function(ret, param_tys);
-        let fun = self
-            .begin_function(ret, None, spvh::FunctionControl::NONE, t)
-            .unwrap();
-        self.begin_basic_block(None).unwrap();
-
-        let mut max = 0;
-        let mut locals_m = IndexMap::with_capacity(locals.len());
-        for l in locals {
-            let ty = l.ty;
-            let ty = self.ptr(ty, spvh::StorageClass::Function);
-            let n = self.variable(ty, None, spvh::StorageClass::Function, None);
-            locals_m.insert(l.idx, n);
-            max = l.idx.max(max);
-        }
-
-        // Parameters are separate from locals in SPIR-V, so we store them into the corresponding locals
-        for (idx, ty) in params.into_iter().enumerate() {
-            let ty = self.get(ty);
-            let n = self.function_parameter(ty).unwrap();
-            // If it's not in locals_m, it's not used - no need to store it anywhere
-            if let Some(l) = locals_m.get(idx as u32) {
-                self.store(*l, n, None, []).unwrap();
+                x => panic!("We don't support importing {:?}", x),
             }
         }
 
-        self.locals = locals_m;
+        let globals = m
+            .global_section()
+            .into_iter()
+            .flat_map(|x| x.entries());
+        for g in globals {
+            let wty = g.global_type().content_type();
+            let pty = self.ptr(wty, spvh::StorageClass::Private);
+            let ty = self.get(wty);
 
-        // We need to initialize `self.thread_id` from `self.thread_id_v3`
-        let t_uint = self.get(wasm::ValueType::I32);
-        let t_uint_ptr = self.type_pointer(None, spvh::StorageClass::Input, t_uint);
-        let const_0 = self.constant_u32(t_uint, 0);
-        let thread_id_v3 = self.thread_id_v3;
-        let thread_id = self
-            .access_chain(t_uint_ptr, None, thread_id_v3, [const_0])
-            .unwrap();
-        let thread_id = self.load(t_uint, None, thread_id, None, []).unwrap();
-        self.thread_id = thread_id;
+            let init = g.init_expr().code();
+            let init = match init {
+                [wasm::Instruction::I32Const(i), wasm::Instruction::End] => self.constant_u32(ty, unsafe { std::mem::transmute(*i) }),
+                x => panic!("We only support i32.const in init expressions for now! Got {:?}", x),
+            };
 
-        // Now compile the body
-        let r = body.spv(self);
-        if ty.is_some() {
-            self.ret_value(r).unwrap();
-        } else {
-            self.ret().unwrap();
+            let n = self.variable(pty, None, spvh::StorageClass::Private, Some(init));
+            self.globals.insert(global_idx, SGlobal::User(wty, n));
+            global_idx += 1;
         }
-        self.end_function().unwrap();
-
-        self.funs.push(Fun::Defined(fun, ret));
     }
 
-    pub fn finish(mut self, entry: Option<u32>) -> dr::Module {
+    /// Returns whether it did anything
+    fn fun(&mut self, f: u32, set_offset: bool) -> bool {
+        if let Fun::Defined {
+            code: ir::Fun { params, ty, body },
+            ret_ty,
+            fun,
+            offset_setting_version,
+            ..
+        } = self.funs[f as usize].clone()
+        {
+            let fun = if set_offset {
+                if let Some(o) = offset_setting_version {
+                    self.heap_offset.1 = false;
+                    if let Fun::Defined { offset_setting_version, .. } = &mut self.funs[f as usize] {
+                        *offset_setting_version = None;
+                    } else { unreachable!() }
+                    o
+                } else {
+                    return false;
+                }
+            } else {
+                self.heap_offset.1 = true;
+                fun
+            };
+
+            let locals = body.locals();
+
+            let t = self.fun_ty(ret_ty, params.clone());
+            self.begin_function(ret_ty, Some(fun), spvh::FunctionControl::NONE, t)
+                .unwrap();
+            self.begin_basic_block(None).unwrap();
+
+            let mut max = 0;
+            let mut locals_m = IndexMap::with_capacity(locals.len());
+            for l in locals {
+                let ty = l.ty;
+                let ty = self.ptr(ty, spvh::StorageClass::Function);
+                let n = self.variable(ty, None, spvh::StorageClass::Function, None);
+                locals_m.insert(l.idx, n);
+                max = l.idx.max(max);
+            }
+
+            // Parameters are separate from locals in SPIR-V, so we store them into the corresponding locals
+            for (idx, ty) in params.into_iter().enumerate() {
+                let ty = self.get(ty);
+                let n = self.function_parameter(ty).unwrap();
+                // If it's not in locals_m, it's not used - no need to store it anywhere
+                if let Some(l) = locals_m.get(idx as u32) {
+                    self.store(*l, n, None, []).unwrap();
+                }
+            }
+
+            self.locals = locals_m;
+
+            // We need to initialize `self.thread_id` from `self.thread_id_v3`
+            let t_uint = self.get(wasm::ValueType::I32);
+            let t_uint_ptr = self.type_pointer(None, spvh::StorageClass::Input, t_uint);
+            let const_0 = self.constant_u32(t_uint, 0);
+            let thread_id_v3 = self.thread_id_v3;
+            let thread_id = self
+                .access_chain(t_uint_ptr, None, thread_id_v3, [const_0])
+                .unwrap();
+            let thread_id = self.load(t_uint, None, thread_id, None, []).unwrap();
+            self.thread_id = thread_id;
+
+            // Now compile the body
+            let r = body.spv(self);
+            if ty.is_some() {
+                self.ret_value(r).unwrap();
+            } else {
+                self.ret().unwrap();
+            }
+            self.end_function().unwrap();
+
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn finish(mut self, entry: Option<u32>, set_offset: bool) -> dr::Module {
         if let Some(entry) = entry {
             match self.funs[entry as usize] {
-                Fun::Defined(entry, _) => {
+                Fun::Defined {
+                    fun,
+                    could_set_offset: false,
+                    ..
+                } => {
                     let id = self.thread_id_v3;
-                    self.entry_point(spvh::ExecutionModel::GLCompute, entry, "main", [id]);
-                    self.execution_mode(entry, spvh::ExecutionMode::LocalSize, [64, 1, 1]);
+                    self.entry_point(spvh::ExecutionModel::GLCompute, fun, "main", [id]);
+                    self.execution_mode(fun, spvh::ExecutionMode::LocalSize, [64, 1, 1]);
+                }
+                Fun::Defined {
+                    fun,
+                    ..
+                } if !set_offset => {
+                    let id = self.thread_id_v3;
+                    self.entry_point(spvh::ExecutionModel::GLCompute, fun, "main", [id]);
+                    self.execution_mode(fun, spvh::ExecutionMode::LocalSize, [64, 1, 1]);
+                }
+                ref f @ Fun::Defined { .. } => {
+                    let mut f = f.clone();
+                    let fun = if let Fun::Defined {
+                        offset_setting_version,
+                        ..
+                    } = &mut f
+                    {
+                        let fun = self.id();
+                        *offset_setting_version = Some(fun);
+                        fun
+                    } else {
+                        unreachable!()
+                    };
+                    self.funs[entry as usize] = f;
+
+                    let mut b = true;
+                    while b {
+                        b = false;
+                        for i in 0..self.funs.len() as u32 {
+                            if self.fun(i, true) {
+                                b = true;
+                            }
+                        }
+                    }
+
+                    let id = self.thread_id_v3;
+                    self.entry_point(spvh::ExecutionModel::GLCompute, fun, "main", [id]);
+                    self.execution_mode(fun, spvh::ExecutionMode::LocalSize, [64, 1, 1]);
                 }
                 _ => panic!("Only user defined functions can be the start function"),
             }
@@ -377,12 +587,35 @@ impl ToSpirv for ir::Base {
     fn spv(self, ctx: &mut Ctx) -> u32 {
         match self {
             ir::Base::Call(i, mut params) => {
-                match ctx.funs[i as usize] {
-                    Fun::Defined(f, t) => {
-                        let params: Vec<_> = params.into_iter().map(|x| x.spv(ctx)).collect();
-                        ctx.function_call(t, None, f, params).unwrap()
+                let offset_fun = ctx.id();
+                match &mut ctx.funs[i as usize] {
+                    Fun::Defined {
+                        fun,
+                        ret_ty,
+                        could_set_offset,
+                        offset_setting_version,
+                        ..
+                    } => {
+                        if *could_set_offset && !ctx.heap_offset.1 {
+                            let t = *ret_ty;
+
+                            ctx.heap_offset.1 = true;
+                            *offset_setting_version = Some(offset_fun);
+
+                            let params: Vec<_> = params.into_iter().map(|x| x.spv(ctx)).collect();
+                            ctx.function_call(t, None, offset_fun, params).unwrap()
+                        } else {
+                            let f = *fun;
+                            let t = *ret_ty;
+
+                            let params: Vec<_> = params.into_iter().map(|x| x.spv(ctx)).collect();
+                            ctx.function_call(t, None, f, params).unwrap()
+                        }
                     }
                     Fun::BufGet(ty, buf) => {
+                        let ty = *ty;
+                        let buf = *buf;
+
                         let ptr = params.pop().unwrap();
 
                         let uint = ctx.get(wasm::ValueType::I32);
@@ -399,6 +632,9 @@ impl ToSpirv for ir::Base {
                         ctx.load(ty, None, ptr, None, []).unwrap()
                     }
                     Fun::BufSet(ty, buf) => {
+                        let ty = *ty;
+                        let buf = *buf;
+
                         let val = params.pop().unwrap();
                         let ptr = params.pop().unwrap();
 
@@ -569,50 +805,92 @@ impl ToSpirv for ir::Base {
                 ctx.store(l, val, None, []).unwrap();
                 0
             }
-            ir::Base::GetGlobal(g) => {
-                assert_eq!(
-                    g,
-                    ir::Global {
-                        ty: wasm::GlobalType::new(wasm::ValueType::I32, false),
-                        idx: 0
-                    }
-                );
-                ctx.thread_id
+            ir::Base::GetGlobal(l) => {
+                let l = *ctx.globals.get(l.idx).unwrap();
+                l.get(ctx)
             }
-            ir::Base::Load(_ty, _ptr) => {
-                panic!("*.load not supported anymore! Use (import \"spv\" \"buffer:<set>:<binding>:load\" (func $load (param i32) (result <ty>)))")
-                // let uint = ctx.get(wasm::ValueType::I32);
-                // let c0 = ctx.constant_u32(uint, 0);
-                //
-                // let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Uniform);
-                // let ty = ctx.get(ty);
-                // let ptr = ptr.spv(ctx);
-                // // Divide by four because of the size of a u32
-                // let c4 = ctx.constant_u32(uint, 4);
-                // let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
-                //
-                // let buf = ctx.buffer;
-                // let ptr = ctx.access_chain(ptr_ty, None, buf, [c0, ptr]).unwrap();
-                // ctx.load(ty, None, ptr, None, []).unwrap()
+            ir::Base::SetGlobal(l, val) => {
+                let l = *ctx.globals.get(l.idx).unwrap();
+                if let SGlobal::User(_, l) = l {
+                    let val = val.spv(ctx);
+                    ctx.store(l, val, None, []).unwrap();
+                } else {
+                    panic!("Can't set spv.id to a new value!");
+                }
+                0
             }
-            ir::Base::Store(_ty, _ptr, _val) => {
-                panic!("*.store not supported anymore! Use (import \"spv\" \"buffer:<set>:<binding>:store\" (func $store (param i32 <ty>)))")
-                // let uint = ctx.get(wasm::ValueType::I32);
-                // let c0 = ctx.constant_u32(uint, 0);
-                //
-                // // The pointer is lower in the stack for the WASM store instruction, so it gets evaluated first.
-                // let ptr = ptr.spv(ctx);
-                // let val = val.spv(ctx);
-                //
-                // let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Uniform);
-                // // Divide by four because of the size of a u32
-                // let c4 = ctx.constant_u32(uint, 4);
-                // let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
-                //
-                // let buf = ctx.buffer;
-                // let ptr = ctx.access_chain(ptr_ty, None, buf, [c0, ptr]).unwrap();
-                // ctx.store(ptr, val, None, []).unwrap();
-                // 0
+            ir::Base::Load(ty, ptr) => {
+                let uint = ctx.get(wasm::ValueType::I32);
+
+                let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Private);
+                let ty = ctx.get(ty);
+                let ptr = ptr.spv(ctx);
+
+                // If it hasn't set yet, put this pointer in the middle of the heap range
+                let offset = ctx.heap_offset;
+                let ptr = if !offset.1 {
+                    ctx.heap_offset.1 = true;
+
+                    // Set the new offset to the pointer minus 64 (half the heap size)
+                    let c64 = ctx.constant_u32(uint, 64);
+                    let new_offset = ctx.i_sub(uint, None, ptr, c64).unwrap();
+                    let c0 = ctx.constant_u32(uint, 0);
+                    let ext = ctx.ext;
+                    let new_offset = ctx.ext_inst(uint, None, ext, spvh::GLOp::SMax as u32, [new_offset, c0]).unwrap();
+                    ctx.store(offset.0, new_offset, None, []).unwrap();
+
+                    // New pointer
+                    ctx.i_sub(uint, None, ptr, new_offset).unwrap()
+                } else {
+                    let offset = ctx.load(uint, None, offset.0, None, []).unwrap();
+                    ctx.i_sub(uint, None, ptr, offset).unwrap()
+                };
+
+                // Divide by four because of the size of a u32
+                let c4 = ctx.constant_u32(uint, 4);
+                let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
+
+                let heap = ctx.heap;
+                let ptr = ctx.access_chain(ptr_ty, None, heap, [ptr]).unwrap();
+                ctx.load(ty, None, ptr, None, []).unwrap()
+            }
+            ir::Base::Store(ty, ptr, val) => {
+                let uint = ctx.get(wasm::ValueType::I32);
+
+                // The pointer is lower in the stack for the WASM store instruction, so it gets evaluated first.
+                let ptr = ptr.spv(ctx);
+                let val = val.spv(ctx);
+
+                let ptr_ty = ctx.ptr(ty, spvh::StorageClass::Private);
+
+                // If it hasn't set yet, put this pointer in the middle of the heap range
+                let offset = ctx.heap_offset;
+                let ptr = if !offset.1 {
+                    ctx.heap_offset.1 = true;
+
+                    // Set the new offset to the pointer minus 64 (half the heap size)
+                    let c64 = ctx.constant_u32(uint, 64);
+                    let new_offset = ctx.i_sub(uint, None, ptr, c64).unwrap();
+                    let c0 = ctx.constant_u32(uint, 0);
+                    let ext = ctx.ext;
+                    let new_offset = ctx.ext_inst(uint, None, ext, spvh::GLOp::SMax as u32, [new_offset, c0]).unwrap();
+                    ctx.store(offset.0, new_offset, None, []).unwrap();
+
+                    // New pointer
+                    ctx.i_sub(uint, None, ptr, new_offset).unwrap()
+                } else {
+                    let offset = ctx.load(uint, None, offset.0, None, []).unwrap();
+                    ctx.i_sub(uint, None, ptr, offset).unwrap()
+                };
+
+                // Divide by four because of the size of a u32
+                let c4 = ctx.constant_u32(uint, 4);
+                let ptr = ctx.u_div(uint, None, ptr, c4).unwrap();
+
+                let heap = ctx.heap;
+                let ptr = ctx.access_chain(ptr_ty, None, heap, [ptr]).unwrap();
+                ctx.store(ptr, val, None, []).unwrap();
+                0
             }
             ir::Base::If { cond, t, f } => {
                 let l_t = ctx.id();
