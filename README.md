@@ -22,7 +22,7 @@ See `examples/comp.wat` for an example of a compute shader written in WebAssembl
 ## Linear memory
 We emulate a heap for linear memory with a stack-allocated array if the WASM module needs it.
 It's always exactly 128 bytes in size - it panics if the data section is bigger than that, but has undefined behaviour if a load or store in the shader goes over.
-We're somewhat intelligent about which 128 bytes to use, though. If a data section is present, the 128 bytes starts at the beginning of the data section.
+We're somewhat intelligent about which 128 bytes to use, though. If a data section is present, the data section is in the middle of the 128 byte window.
 Otherwise, it starts 64 bytes before the pointer passed to the first load or store.
 That's enough to work with LLVM's bump-down stack allocator in most cases.
 

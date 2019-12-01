@@ -202,15 +202,14 @@ impl Ctx {
                         _ => panic!("wasm-vk doesn't currently support offset expressions other than i32.const! Got instructions {:?}", i.code()),
                     }
                 };
-                let offset = (
-                    self.constant_u32(t_uint, unsafe { std::mem::transmute(offset.0) }),
+                let offset: (u32, _) = (
+                    unsafe { std::mem::transmute(offset.0) },
                     offset.1,
                 );
-                self.heap_offset = offset;
 
                 use std::convert::TryInto;
                 // We store the bytes as little-endian
-                let mut v: Vec<u32> = e
+                let mut data: Vec<u32> = e
                     .value()
                     .chunks(4)
                     .map(|x| {
@@ -218,10 +217,29 @@ impl Ctx {
                     })
                     .map(|x| self.constant_u32(t_uint, x))
                     .collect();
-                assert!(v.len() <= 32, "Memory size must be <= 128 bytes");
+                let l = data.len();
+                assert!(l <= 32, "Memory size must be <= 128 bytes");
+                // Round l up to the next even number
+                let l = if l % 2 == 0 {
+                    l
+                } else {
+                    data.push(c_0);
+                    l + 1
+                };
+                // The padding on either side
+                let n = (32 - l) / 2;
+
+                let offset = (
+                    // TODO if saturating_sub is less than n change the actual data
+                    // Right now it doesn't work
+                    self.constant_u32(t_uint, (offset.0).saturating_sub(4 * n as u32)),
+                    offset.1,
+                );
+                self.heap_offset = offset;
+
                 // The linear memory is always exactly 128 bytes
-                v.extend(std::iter::repeat(c_0).take(32 - v.len()));
-                v
+                let padding = std::iter::repeat(c_0).take(n);
+                padding.clone().chain(data).chain(padding).collect()
             } else {
                 (0..32).map(|_| c_0).collect()
             };
@@ -336,10 +354,7 @@ impl Ctx {
             }
         }
 
-        let globals = m
-            .global_section()
-            .into_iter()
-            .flat_map(|x| x.entries());
+        let globals = m.global_section().into_iter().flat_map(|x| x.entries());
         for g in globals {
             let wty = g.global_type().content_type();
             let pty = self.ptr(wty, spvh::StorageClass::Private);
@@ -347,8 +362,13 @@ impl Ctx {
 
             let init = g.init_expr().code();
             let init = match init {
-                [wasm::Instruction::I32Const(i), wasm::Instruction::End] => self.constant_u32(ty, unsafe { std::mem::transmute(*i) }),
-                x => panic!("We only support i32.const in init expressions for now! Got {:?}", x),
+                [wasm::Instruction::I32Const(i), wasm::Instruction::End] => {
+                    self.constant_u32(ty, unsafe { std::mem::transmute(*i) })
+                }
+                x => panic!(
+                    "We only support i32.const in init expressions for now! Got {:?}",
+                    x
+                ),
             };
 
             let n = self.variable(pty, None, spvh::StorageClass::Private, Some(init));
@@ -370,9 +390,15 @@ impl Ctx {
             let fun = if set_offset {
                 if let Some(o) = offset_setting_version {
                     self.heap_offset.1 = false;
-                    if let Fun::Defined { offset_setting_version, .. } = &mut self.funs[f as usize] {
+                    if let Fun::Defined {
+                        offset_setting_version,
+                        ..
+                    } = &mut self.funs[f as usize]
+                    {
                         *offset_setting_version = None;
-                    } else { unreachable!() }
+                    } else {
+                        unreachable!()
+                    }
                     o
                 } else {
                     return false;
@@ -449,10 +475,7 @@ impl Ctx {
                     self.entry_point(spvh::ExecutionModel::GLCompute, fun, "main", [id]);
                     self.execution_mode(fun, spvh::ExecutionMode::LocalSize, [64, 1, 1]);
                 }
-                Fun::Defined {
-                    fun,
-                    ..
-                } if !set_offset => {
+                Fun::Defined { fun, .. } if !set_offset => {
                     let id = self.thread_id_v3;
                     self.entry_point(spvh::ExecutionModel::GLCompute, fun, "main", [id]);
                     self.execution_mode(fun, spvh::ExecutionMode::LocalSize, [64, 1, 1]);
@@ -836,7 +859,9 @@ impl ToSpirv for ir::Base {
                     let new_offset = ctx.i_sub(uint, None, ptr, c64).unwrap();
                     let c0 = ctx.constant_u32(uint, 0);
                     let ext = ctx.ext;
-                    let new_offset = ctx.ext_inst(uint, None, ext, spvh::GLOp::SMax as u32, [new_offset, c0]).unwrap();
+                    let new_offset = ctx
+                        .ext_inst(uint, None, ext, spvh::GLOp::SMax as u32, [new_offset, c0])
+                        .unwrap();
                     ctx.store(offset.0, new_offset, None, []).unwrap();
 
                     // New pointer
@@ -873,7 +898,9 @@ impl ToSpirv for ir::Base {
                     let new_offset = ctx.i_sub(uint, None, ptr, c64).unwrap();
                     let c0 = ctx.constant_u32(uint, 0);
                     let ext = ctx.ext;
-                    let new_offset = ctx.ext_inst(uint, None, ext, spvh::GLOp::SMax as u32, [new_offset, c0]).unwrap();
+                    let new_offset = ctx
+                        .ext_inst(uint, None, ext, spvh::GLOp::SMax as u32, [new_offset, c0])
+                        .unwrap();
                     ctx.store(offset.0, new_offset, None, []).unwrap();
 
                     // New pointer
