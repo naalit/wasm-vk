@@ -60,6 +60,7 @@ impl SGlobal {
 }
 
 pub struct Ctx {
+    current_block: u32,
     tys: Types,
     ptrs: HashMap<(wasm::ValueType, spvh::StorageClass), u32>,
     fun_tys: HashMap<(u32, Vec<wasm::ValueType>), u32>,
@@ -96,6 +97,7 @@ impl Ctx {
 
         // A temporary context mostly so we can use the type cache
         let mut c = Ctx {
+            current_block: 0,
             tys: Default::default(),
             ptrs: Default::default(),
             fun_tys: Default::default(),
@@ -134,6 +136,7 @@ impl Ctx {
         self.imports(m);
         let set_offset = !self.heap_offset.1;
         let base = ir::to_base(m);
+
         for f in base {
             let ret_ty = f.ty.map_or(self.void(), |x| self.get(x));
             // TODO what if this function calls another function that sets offset?
@@ -176,6 +179,12 @@ impl Ctx {
             self.tys.void = Some(v);
             v
         }
+    }
+
+    pub fn begin_basic_block(&mut self, label: Option<u32>) -> Result<u32, dr::Error> {
+        let l = self.b.begin_basic_block(label)?;
+        self.current_block = l;
+        Ok(l)
     }
 
     /// Resolve imports from the module. Make sure to call this before `Ctx::fun()`
@@ -919,7 +928,7 @@ impl ToSpirv for ir::Base {
                 ctx.store(ptr, val, None, []).unwrap();
                 0
             }
-            ir::Base::If { cond, t, f } => {
+            ir::Base::If { cond, ty, t, f } => {
                 let l_t = ctx.id();
                 let l_f = ctx.id();
                 let l_m = ctx.id();
@@ -935,14 +944,23 @@ impl ToSpirv for ir::Base {
                     .unwrap();
                 ctx.branch_conditional(cond, l_t, l_f, []).unwrap();
                 ctx.begin_basic_block(Some(l_t)).unwrap();
-                t.spv(ctx);
+                let a = t.spv(ctx);
+                let a_block = ctx.current_block;
                 ctx.branch(l_m).unwrap();
                 ctx.begin_basic_block(Some(l_f)).unwrap();
-                f.spv(ctx);
+                let b = f.spv(ctx);
+                let b_block = ctx.current_block;
                 ctx.branch(l_m).unwrap();
                 ctx.begin_basic_block(Some(l_m)).unwrap();
 
-                0
+                match ty {
+                    None => 0,
+                    Some(t) => {
+                        let t = ctx.get(t);
+                        // TODO the actual block we were last in
+                        ctx.phi(t, None, [(a, a_block), (b, b_block)]).unwrap()
+                    },
+                }
             }
             ir::Base::Loop(a) => {
                 let head = ctx.id();

@@ -29,7 +29,7 @@ macro_rules! test {
 }
 
 // --------------------
-// ACTUALY TESTS
+// ACTUALLY TESTS
 // --------------------
 
 test!(memory);
@@ -37,6 +37,7 @@ test!(one);
 test!(fib);
 test!(rust);
 test!(call);
+test!(typed_if);
 
 // --------------------
 // MORE FRAMEWORK STUFF

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use crate::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,24 @@ pub enum INumOp {
     Xor,
 }
 
+impl std::fmt::Display for INumOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            INumOp::Add => write!(f, "+"),
+            INumOp::Sub => write!(f, "-"),
+            INumOp::Mul => write!(f, "*"),
+            INumOp::DivS => write!(f, "/_s"),
+            INumOp::DivU => write!(f, "/_u"),
+            INumOp::Shl => write!(f, "<<"),
+            INumOp::ShrU => write!(f, ">>_u"),
+            INumOp::ShrS => write!(f, ">>_s"),
+            INumOp::And => write!(f, "&"),
+            INumOp::Or => write!(f, "|"),
+            INumOp::Xor => write!(f, "^"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ICompOp {
     Eq,
@@ -27,6 +46,23 @@ pub enum ICompOp {
     LtS,
     GtU,
     GtS,
+}
+
+impl std::fmt::Display for ICompOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ICompOp::Eq => write!(f, "=="),
+            ICompOp::NEq => write!(f, "!="),
+            ICompOp::LeS => write!(f, "<=_s"),
+            ICompOp::GeS => write!(f, ">=_s"),
+            ICompOp::GtS => write!(f, ">_s"),
+            ICompOp::LtS => write!(f, "<_s"),
+            ICompOp::LeU => write!(f, "<=_u"),
+            ICompOp::GeU => write!(f, ">=_u"),
+            ICompOp::GtU => write!(f, ">_u"),
+            ICompOp::LtU => write!(f, "<_u"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +92,19 @@ pub enum FNumOp {
     Max,
 }
 
+impl std::fmt::Display for FNumOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            FNumOp::Add => write!(f, "+"),
+            FNumOp::Sub => write!(f, "-"),
+            FNumOp::Mul => write!(f, "*"),
+            FNumOp::Div => write!(f, "/"),
+            FNumOp::Min => write!(f, "`min`"),
+            FNumOp::Max => write!(f, "`max`"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FCompOp {
     Eq,
@@ -64,6 +113,19 @@ pub enum FCompOp {
     Ge,
     Lt,
     Gt,
+}
+
+impl std::fmt::Display for FCompOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            FCompOp::Eq => write!(f, "=="),
+            FCompOp::NEq => write!(f, "!="),
+            FCompOp::Le => write!(f, "<="),
+            FCompOp::Ge => write!(f, ">="),
+            FCompOp::Gt => write!(f, ">"),
+            FCompOp::Lt => write!(f, "<"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +145,7 @@ pub enum Const {
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 struct Sym(u32);
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Local {
     pub ty: wasm::ValueType,
     pub idx: u32,
@@ -121,9 +183,47 @@ pub enum Base {
     Seq(Box<Base>, Box<Base>),
     If {
         cond: Box<Base>,
+        ty: Option<wasm::ValueType>,
         t: Box<Base>,
         f: Box<Base>,
     },
+}
+
+impl std::fmt::Display for Base {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let w = f.width().unwrap_or(0);
+        let w = w + 2;
+        let r = match self {
+            Base::INumOp(_w, op, a, b) => write!(f, "{:w$} {} {:w$}", a, op, b, w=w),
+            Base::FNumOp(_w, op, a, b) => write!(f, "{:w$} {} {:w$}", a, op, b, w=w),
+            Base::ICompOp(_w, op, a, b) => write!(f, "{:w$} {} {:w$}", a, op, b, w=w),
+            Base::FCompOp(_w, op, a, b) => write!(f, "{:w$} {} {:w$}", a, op, b, w=w),
+            Base::FUnOp(_w, op, a) => write!(f, "{:?}({:w$})", op, a, w=w),
+            Base::CvtOp(op, a) => write!(f, "{:?}({:w$})", op, a, w=w),
+            Base::Nop => write!(f, "nop"),
+            Base::Const(c) => write!(f, "{:?}", c),
+            Base::Load(t, p) => write!(f, "{}.load({})", t, p),
+            Base::Store(t, p, v) => write!(f, "{}.store({}, {})", t, p, v),
+            Base::GetLocal(l) => write!(f, "%{}", l.idx),
+            Base::SetLocal(l, v) => write!(f, "%{} = {:w$}", l.idx, v, w=w),
+            Base::GetGlobal(l) => write!(f, "{:?}.get", l),
+            Base::SetGlobal(l, v) => write!(f, "{:?}.set({})", l, v),
+            Base::Seq(a, b) => write!(f, "{:w$}\n{:w$}{:w$}", a, "", b, w=w-2),
+            Base::If{cond,t,f:fa,..} => write!(f, "if\n{s:w$}{:w$}\n{s:w2$}then\n{s:w$}{:w$}\n{s:w2$}else\n{s:w$}{:w$}\n{s:w2$}end", cond, t, fa, s="", w=w, w2=w-2),
+            Base::Loop(a) => write!(f, "loop\n{s:w$}{:w$}\n{s:w2$}end", a, w=w, s="", w2=w-2),
+            Base::Call(fun, p) => {
+                write!(f, "call {}(", fun)?;
+                for i in p {
+                    write!(f, "{:w$},", i, w=w)?;
+                }
+                write!(f, ")")
+            }
+            Base::Break => write!(f, "break"),
+            Base::Continue => write!(f, "continue"),
+            Base::Return => write!(f, "return"),
+        };
+        r
+    }
 }
 
 impl Base {
@@ -149,10 +249,11 @@ impl Base {
             Base::SetGlobal(u, x) => f(Base::SetGlobal(u, Box::new(x.map(f)))),
             Base::Load(t, p) => f(Base::Load(t, Box::new(p.map(f)))),
             Base::Loop(a) => f(Base::Loop(Box::new(a.map(f)))),
-            Base::If { cond, t, f: fa } => f(Base::If {
+            Base::If { cond, t, f: fa, ty } => f(Base::If {
                 cond: Box::new(cond.map(f)),
                 t: Box::new(t.map(f)),
                 f: Box::new(fa.map(f)),
+                ty,
             }),
             Base::Call(i, params) => f(Base::Call(
                 i,
@@ -164,12 +265,12 @@ impl Base {
 
     fn fold_leaves<T>(&self, start: T, f: &impl Fn(T, &Self) -> T) -> T {
         match self {
+            Base::If { t, f: fa, cond, .. } => fa.fold_leaves(t.fold_leaves(cond.fold_leaves(start, f), f), f),
             Base::Seq(a, b)
             | Base::INumOp(_, _, a, b)
             | Base::ICompOp(_, _, a, b)
             | Base::FCompOp(_, _, a, b)
             | Base::FNumOp(_, _, a, b)
-            | Base::If { t: a, f: b, .. }
             | Base::Store(_, a, b) => b.fold_leaves(a.fold_leaves(start, f), f),
             Base::Loop(x)
             | Base::SetLocal(_, x)
@@ -185,12 +286,12 @@ impl Base {
     pub fn fold<T>(&self, start: T, f: &impl Fn(T, &Self) -> T) -> T {
         let n = f(start, self);
         match self {
+            Base::If { t, f: fa, cond, .. } => fa.fold(t.fold(cond.fold(n, f), f), f),
             Base::Seq(a, b)
             | Base::INumOp(_, _, a, b)
             | Base::FNumOp(_, _, a, b)
             | Base::ICompOp(_, _, a, b)
             | Base::FCompOp(_, _, a, b)
-            | Base::If { t: a, f: b, .. }
             | Base::Store(_, a, b) => b.fold(a.fold(n, f), f),
             Base::Loop(x)
             | Base::SetLocal(_, x)
@@ -203,10 +304,10 @@ impl Base {
         }
     }
 
-    pub fn locals(&self) -> Vec<Local> {
-        self.fold(Vec::new(), &|mut acc, x| match x {
+    pub fn locals(&self) -> HashSet<Local> {
+        self.fold(HashSet::new(), &|mut acc, x| match x {
             Base::SetLocal(l, _) | Base::GetLocal(l) => {
-                acc.push(*l);
+                acc.insert(*l);
                 acc
             }
             _ => acc,
@@ -242,6 +343,7 @@ enum Direct {
     // Block(Vec<Direct>),
     If {
         cond: Box<Direct>,
+        ty: Option<wasm::ValueType>,
         t: Box<Direct>,
         f: Box<Direct>,
     },
@@ -283,10 +385,11 @@ impl Direct {
             Direct::Load(t, p) => f(Direct::Load(t, Box::new(p.map(f)))),
             Direct::Label(a) => f(Direct::Label(Box::new(a.map(f)))),
             Direct::Loop(a) => f(Direct::Loop(Box::new(a.map(f)))),
-            Direct::If { cond, t, f: fa } => f(Direct::If {
+            Direct::If { cond, t, f: fa, ty } => f(Direct::If {
                 cond: Box::new(cond.map(f)),
                 t: Box::new(t.map(f)),
                 f: Box::new(fa.map(f)),
+                ty,
             }),
             Direct::Call(i, params) => f(Direct::Call(
                 i,
@@ -336,10 +439,11 @@ impl Direct {
             Direct::SetLocal(u, x) => f(Direct::SetLocal(u, Box::new(x.map_no_lbl(f)))),
             Direct::SetGlobal(u, x) => f(Direct::SetGlobal(u, Box::new(x.map_no_lbl(f)))),
             Direct::Load(t, p) => f(Direct::Load(t, Box::new(p.map_no_lbl(f)))),
-            Direct::If { cond, t, f: fa } => f(Direct::If {
+            Direct::If { cond, t, f: fa, ty } => f(Direct::If {
                 cond: Box::new(cond.map_no_lbl(f)),
                 t: Box::new(t.map_no_lbl(f)),
                 f: Box::new(fa.map_no_lbl(f)),
+                ty,
             }),
             Direct::Call(i, params) => f(Direct::Call(
                 i,
@@ -431,10 +535,7 @@ impl Direct {
                     // let l = false
                     // loop (a.replace_br(Seq(l = true, Op("break")), offset + 1))
                     // if l { with } else {}
-                    let mut lk = NLOCALS.write().unwrap();
-                    *lk += 1;
-                    let l = *lk - 1;
-                    drop(lk);
+                    let l = fresh_local();
                     let l = Local {
                         ty: wasm::ValueType::I32,
                         idx: l,
@@ -459,6 +560,7 @@ impl Direct {
                             cond: Box::new(Direct::GetLocal(l)),
                             t: Box::new(with.clone()),
                             f: Box::new(Direct::Nop),
+                            ty: None,
                         }),
                     )
                 } else {
@@ -497,10 +599,7 @@ impl Direct {
                 if a.br().map_or(true, |x| x == 0) {
                     Direct::Seq(Box::new(Direct::Loop(a)), Box::new(x))
                 } else {
-                    let mut lk = NLOCALS.write().unwrap();
-                    *lk += 1;
-                    let l = *lk - 1;
-                    drop(lk);
+                    let l = fresh_local();
                     let l = Local {
                         ty: wasm::ValueType::I32,
                         idx: l,
@@ -525,6 +624,7 @@ impl Direct {
                             cond: Box::new(Direct::GetLocal(l)),
                             t: Box::new(x),
                             f: Box::new(Direct::Nop),
+                            ty: None,
                         }),
                     )
                 }
@@ -542,16 +642,17 @@ impl Direct {
                     Direct::Seq(a, Box::new(b.insert(x, offset)))
                 }
             }
-            Direct::If { cond, t, f } => {
+            Direct::If { cond, t, f, ty } => {
                 assert_eq!(cond.br(), None, "br not allowed in expressions");
                 if t.br().is_some() || f.br().is_some() {
                     Direct::If {
                         cond,
                         t: Box::new(t.insert(x.clone(), offset)),
                         f: Box::new(f.insert(x, offset)),
+                        ty,
                     }
                 } else {
-                    Direct::Seq(Box::new(Direct::If { cond, t, f }), Box::new(x))
+                    Direct::Seq(Box::new(Direct::If { cond, t, f, ty }), Box::new(x))
                 }
             }
             op => Direct::Seq(Box::new(op), Box::new(x)),
@@ -576,8 +677,9 @@ impl Direct {
             Direct::CvtOp(op, a) => Base::CvtOp(op, Box::new(a.base())),
             Direct::FUnOp(w, op, a) => Base::FUnOp(w, op, Box::new(a.base())),
             Direct::Const(c) => Base::Const(c),
-            Direct::If { cond, t, f } => Base::If {
+            Direct::If { cond, ty, t, f } => Base::If {
                 cond: Box::new(cond.base()),
+                ty,
                 t: Box::new(t.base()),
                 f: Box::new(f.base()),
             },
@@ -604,6 +706,46 @@ impl Direct {
             }
             // TODO - do we add Break at the end?
             Direct::Loop(a) => Base::Loop(Box::new(a.replace_br(Direct::Continue, 0, true).base())),
+        }
+    }
+
+    fn ty(&self) -> Option<wasm::ValueType> {
+        match self {
+            Direct::INumOp(Width::W32, _, _, _) => Some(wasm::ValueType::I32),
+            Direct::INumOp(Width::W64, _, _, _) => Some(wasm::ValueType::I64),
+            Direct::FNumOp(Width::W32, _, _, _) => Some(wasm::ValueType::F32),
+            Direct::FNumOp(Width::W64, _, _, _) => Some(wasm::ValueType::F64),
+            Direct::FUnOp(Width::W32, _, _) => Some(wasm::ValueType::F32),
+            Direct::FUnOp(Width::W64, _, _) => Some(wasm::ValueType::F64),
+            Direct::CvtOp(c,_) => Some(match c {
+                CvtOp::F32toI32S | CvtOp::F32toI32U => wasm::ValueType::I32,
+                CvtOp::I32toF32S | CvtOp::I32toF32U => wasm::ValueType::F32,
+            }),
+            Direct::Const(c) => Some(c.ty()),
+            Direct::If { ty, .. } => *ty,
+            Direct::Call(_,_) => panic!("TODO lookup function"),
+            Direct::GetGlobal(Global { ty, .. }) => Some(ty.content_type()),
+            Direct::Load(ty,_) | Direct::GetLocal(Local { ty, .. }) => Some(*ty),
+            Direct::FCompOp(_,_,_,_) | Direct::ICompOp(_,_,_,_) => Some(wasm::ValueType::I32),
+            Direct::Br(_) | Direct::Break | Direct::Continue | Direct::Loop(_) | Direct::Nop | Direct::Return | Direct::Store(_,_,_) | Direct::SetGlobal(_,_) | Direct::SetLocal(_,_) => None,
+            Direct::Label(a) | Direct::Seq(_,a) => a.ty(),
+        }
+    }
+}
+
+fn fresh_local() -> u32 {
+    let mut lk = NLOCALS.write().unwrap();
+    *lk += 1;
+    *lk - 1
+}
+
+impl Const {
+    fn ty(&self) -> wasm::ValueType {
+        match self {
+            Const::I32(_) => wasm::ValueType::I32,
+            Const::F32(_) => wasm::ValueType::F32,
+            Const::I64(_) => wasm::ValueType::I64,
+            Const::F64(_) => wasm::ValueType::F64,
         }
     }
 }
@@ -688,18 +830,25 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
         enum BlockTy {
             Block(Vec<Direct>),
             Loop(Vec<Direct>),
-            If(Box<Direct>, Vec<Direct>),
-            Else(Box<Direct>, Vec<Direct>, Vec<Direct>),
+            If(Option<wasm::ValueType>, Box<Direct>, Vec<Direct>),
+            Else(Option<wasm::ValueType>, Box<Direct>, Vec<Direct>, Vec<Direct>),
         }
         impl BlockTy {
             fn push(&mut self, op: Direct) {
                 match self {
                     BlockTy::Block(v)
                     | BlockTy::Loop(v)
-                    | BlockTy::If(_, v)
-                    | BlockTy::Else(_, _, v) => {
+                    | BlockTy::If(_, _, v)
+                    | BlockTy::Else(_, _, _, v) => {
                         v.push(op);
                     }
+                }
+            }
+
+            fn ty(&self) -> Option<wasm::ValueType> {
+                match self {
+                    BlockTy::If(t, _,_) | BlockTy::Else(t,_,_,_) => *t,
+                    _ => None,
                 }
             }
 
@@ -711,13 +860,15 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                 }
 
                 match self {
-                    BlockTy::If(cond, v) => Direct::If {
+                    BlockTy::If(ty, cond, v) => Direct::If {
                         cond,
                         t: Box::new(Direct::Label(Box::new(fold(v)))),
                         f: Box::new(Direct::Nop),
+                        ty,
                     },
-                    BlockTy::Else(cond, t, f) => Direct::If {
+                    BlockTy::Else(ty, cond, t, f) => Direct::If {
                         cond,
+                        ty,
                         t: Box::new(Direct::Label(Box::new(fold(t)))),
                         f: Box::new(Direct::Label(Box::new(fold(f)))),
                     },
@@ -742,6 +893,7 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
             .flat_map(|x| (0..x.count()).map(move |_| x.value_type()))
             .collect();
         let locals: Vec<_> = params.iter().cloned().chain(locals).collect();
+        if *NLOCALS.read().unwrap() < locals.len() as u32 { *NLOCALS.write().unwrap() = locals.len() as u32; }
 
         macro_rules! numop {
             ($w:ident, $op:ident) => {{
@@ -846,6 +998,37 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                         blocks.last_mut().unwrap().push(Direct::Call(*i, params))
                     }
                 }
+                Select => {
+                    let cond = stack.pop().unwrap();
+                    let b = stack.pop().unwrap();
+                    let a = stack.pop().unwrap();
+                    let ty = b.ty();
+                    assert_eq!(ty, a.ty());
+                    let ty = ty.unwrap();
+
+                    let idx = fresh_local();
+                    let la = Local {
+                        ty,
+                        idx,
+                    };
+                    let idx = fresh_local();
+                    let lb = Local {
+                        ty,
+                        idx,
+                    };
+
+                    blocks.last_mut().unwrap().push(Direct::SetLocal(la, Box::new(a)));
+                    blocks.last_mut().unwrap().push(Direct::SetLocal(lb, Box::new(b)));
+
+                    let a = Box::new(Direct::GetLocal(la));
+                    let b = Box::new(Direct::GetLocal(lb));
+                    stack.push(Direct::If {
+                        cond: Box::new(cond),
+                        t: a,
+                        f: b,
+                        ty: Some(ty),
+                    })
+                }
                 Br(i) => blocks.last_mut().unwrap().push(Direct::Br(*i)),
                 BrIf(i) => {
                     let cond = stack.pop().unwrap();
@@ -853,6 +1036,7 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
                         cond: Box::new(cond),
                         t: Box::new(Direct::Br(*i)),
                         f: Box::new(Direct::Nop),
+                        ty: None,
                     })
                 }
                 Nop => (),
@@ -980,20 +1164,29 @@ fn direct(w: &wasm::Module) -> Vec<Fun<Direct>> {
 
                 Loop(_ty) => blocks.push(BlockTy::Loop(Vec::new())),
                 Block(_ty) => blocks.push(BlockTy::Block(Vec::new())),
-                If(_ty) => {
+                If(ty) => {
                     let cond = stack.pop().unwrap();
-                    blocks.push(BlockTy::If(Box::new(cond), Vec::new()));
+                    blocks.push(BlockTy::If(wasm::block_ty_to_option(*ty), Box::new(cond), Vec::new()));
                 }
                 Else => match blocks.pop().unwrap() {
-                    BlockTy::If(cond, v) => blocks.push(BlockTy::Else(cond, v, Vec::new())),
+                    BlockTy::If(ty, cond, mut v) => {
+                        if ty.is_some() { v.push(stack.pop().unwrap()); }
+                        blocks.push(BlockTy::Else(ty, cond, v, Vec::new()))
+                    },
                     _ => panic!("Else without if"),
                 },
                 End => {
                     if blocks.len() <= 1 {
                         break;
                     } else {
-                        let b = blocks.pop().unwrap();
-                        blocks.last_mut().unwrap().push(b.op());
+                        let mut b = blocks.pop().unwrap();
+
+                        if b.ty().is_some() {
+                            b.push(stack.pop().unwrap());
+                            stack.push(b.op());
+                        } else {
+                            blocks.last_mut().unwrap().push(b.op());
+                        }
                     }
                 }
                 Return => blocks.last_mut().unwrap().push(Direct::Return),

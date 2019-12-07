@@ -15,7 +15,9 @@ use wasm_vk::*;
 
 use std::sync::Arc;
 
-const BUFFER_SIZE: usize = 65536;
+// Image is SIZExSIZE
+const SIZE: usize = 1024;
+const BUFFER_SIZE: usize = SIZE*SIZE;
 
 fn slurp(path: impl AsRef<std::path::Path>) -> String {
     use std::fs::File;
@@ -52,18 +54,10 @@ fn main() {
     let mut f = std::fs::File::create("examples/image.spv").unwrap();
     f.write_all(&spv).unwrap();
 
-    println!("Written generated spirv to 'examples/comp.spv'");
+    println!("Written generated spirv to 'examples/image.spv'");
 
     // Here's the data we'll be using, it's just BUFFER_SIZE consecutive u32s, starting at 0
     let data_iter = 0..BUFFER_SIZE as u32;
-
-    // We used to have an interpreter, and we probably will again eventually
-    // Until then, we're skipping this
-    // // We'll interpret the WASM on the CPU, and time it
-    // let time = Instant::now();
-    // // We just pass `interpret` the buffer, and the `wasm::Module`, and it gives us back the new buffer
-    // let cpu_content = interpret(&data_iter.clone().collect::<Vec<_>>(), &w);
-    // let cpu_time = Instant::now() - time;
 
     // Now we'll run the SPIR-V on the GPU with Vulkano.
     // This is a bunch of boilerplate, see the Vulkano examples for explanations.
@@ -153,7 +147,8 @@ fn main() {
     let command_buffer =
         AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family())
             .unwrap()
-            .dispatch([1024, 1, 1], pipeline.clone(), set.clone(), ())
+            // Our workgroups are 64x1x1
+            .dispatch([BUFFER_SIZE as u32 / 64, 1, 1], pipeline.clone(), set.clone(), ())
             .unwrap()
             // Finish building the command buffer by calling `build`.
             .build()
@@ -177,24 +172,13 @@ fn main() {
 
     // Print the results (but only show the first 12 values of each):
     println!(
-        "GPU compiled in {:?}:\n\t{:?}",
+        "Ran in {:?}",
         gpu_time,
-        &data_buffer_content[..12]
     );
-    // println!(
-    //     "CPU interpreted in {:?}:\n\t{:?}",
-    //     cpu_time,
-    //     &cpu_content[..12]
-    // );
 
     let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-        256,
-        256,
-        // unsafe {
-        //     let l = data_buffer_content.len();
-        //     let p = data_buffer_content.as_ptr() as *const u8;
-        //     std::slice::from_raw_parts(p, l * 4)
-        // }
+        SIZE as u32,
+        SIZE as u32,
         data_buffer_content
             .iter()
             .flat_map(|x| x.to_le_bytes().to_vec())
