@@ -1,20 +1,18 @@
 # This is a very simple script to convert some rustc-generated WAT into WAT that will work with wasm-vk.
 # It uses standard input and output, so you can e.g. run `cat something.wat | python fix_wat.py >> something_else.wat`.
-# It probably won't work with a new Rust program, you'll need to mess with it to get it to work.
-# As a general guide, though, use no_std, and include this at the top of your script:
+# As a general guide, use no_std, and include this at the top of your script:
 # ```rust
 # #[link(wasm_import_module="spv")]
 # extern {
 #     fn trap() -> !;
+#     // This thread's id, for use as a buffer index
 #     fn id() -> usize;
 #     fn sqrt(_: f32) -> f32; // This will be transformed into f32.sqrt in WASM
-# }
 #
-# /// Get this thread's slot in the buffer
-# fn thread_id() -> &'static mut u32 {
-#     unsafe {
-#         core::mem::transmute(id() * 4)
-#     }
+#     #[link_name="buffer:0:0:load"]
+#     fn buf_get(i: usize) -> u32;
+#     #[link_name="buffer:0:0:store"]
+#     fn buf_set(i: usize, x: u32);
 # }
 # ```
 # We emulate linear memory for loads and stores, but make sure your Rust code doesn't use more that about 64 bytes of it

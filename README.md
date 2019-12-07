@@ -82,7 +82,8 @@ Numeric operations: All i32 and f32 instructions EXCEPT:
 - f32.nearest
 - f32.copysign
 - reinterpret instructions
-Control flow (note: we don't currently support blocks returning things):
+Control flow (note: currently only if's can have types attached, and br's can't have a value):
+- select
 - loop
 - block
 - if/then/else
